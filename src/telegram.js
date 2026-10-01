@@ -14,7 +14,7 @@ function benefits(m,side,optionalMerchant=false){
  return 0;
 }
 function cycleEstimate(d){
- const deployed=Math.min(d.capital,d.bdt||d.capital);
+ const deployed=d.capital;
  const methodProfit=deployed*benefits(d.method,d.side,d.merchantOptional);
  const fixed=d.method==="BankTransfer"&&d.bankType==="OtherBank"?10:0;
  const target=deployed*.01;
@@ -28,11 +28,13 @@ async function input(id,text,send){
  if(s.step==="capital"){d.capital=amount(text);if(!(d.capital>0))throw Error("Use e.g. 50k, 1L, 1.25L or 125000.");s.step="cycles";return send(id,"Target cycles today?");}
  if(s.step==="cycles"){d.cycles=Math.floor(Number(text));if(!(d.cycles>0))throw Error("Enter a valid cycle count.");s.step="side";return send(id,"Cycle side?\n1. BUY USDT\n2. SELL USDT");}
  if(s.step==="side"){d.side=/^(1|buy)$/i.test(text)?"BUY":/^(2|sell)$/i.test(text)?"SELL":null;if(!d.side)throw Error("Choose 1/BUY or 2/SELL.");s.step="method";return send(id,"Payment method?\n1. BankTransfer\n2. BkashMerchant\n3. BkashAgent\n4. NagadAgent\n5. BkashPersonal\n6. NagadPersonal");}
- if(s.step==="method"){d.method=method(text);if(!d.method)throw Error("Choose 1-6 or method name.");if(d.method==="BankTransfer"){s.step="bank";return send(id,"Bank transfer type?\n1. Same bank — 0 BDT\n2. Other bank — 10 BDT");}if(d.method==="BkashMerchant"&&d.side==="SELL"){s.step="merchant";return send(id,"bKash Merchant return structure?\n1. Standard +0.40%\n2. Optional +1.80%");}s.step="bdt";return send(id,"Current BDT amount? (50k / 1L / 1.25L accepted)");}
- if(s.step==="bank"){d.bankType=/^(1|same|samebank)$/i.test(text)?"SameBank":/^(2|other|otherbank)$/i.test(text)?"OtherBank":null;if(!d.bankType)throw Error("Choose 1 Same bank or 2 Other bank.");s.step="bdt";return send(id,"Current BDT amount?");}
- if(s.step==="merchant"){d.merchantOptional=/^(2|optional)$/i.test(text);s.step="bdt";return send(id,"Current BDT amount?");}
+ if(s.step==="method"){d.method=method(text);if(!d.method)throw Error("Choose 1-6 or method name.");if(d.method==="BankTransfer"){s.step="bank";return send(id,"Bank transfer type?\n1. Same bank — 0 BDT\n2. Other bank — 10 BDT");}if(d.method==="BkashMerchant"&&d.side==="SELL"){s.step="merchant";return send(id,"bKash Merchant return structure?\n1. Standard +0.40%\n2. Optional +1.80%");}s.step="ready";return send(id,cycleReady(d));}
+ if(s.step==="bank"){d.bankType=/^(1|same|samebank)$/i.test(text)?"SameBank":/^(2|other|otherbank)$/i.test(text)?"OtherBank":null;if(!d.bankType)throw Error("Choose 1 Same bank or 2 Other bank.");s.step="ready";return send(id,cycleReady(d));}
+ if(s.step==="merchant"){d.merchantOptional=/^(2|optional)$/i.test(text);s.step="ready";return send(id,cycleReady(d));}
  if(s.step==="bdt"){d.bdt=amount(text);if(!(d.bdt>=0))throw Error("Use e.g. 50k, 1L, 1.25L or 125000.");s.step="usdt";return send(id,"Current USDT amount?");}
  if(s.step==="usdt"){d.usdt=amount(text);if(!(d.usdt>=0))throw Error("Enter current USDT amount.");s.step="ready";return send(id,cycleReady(d));}
+ if(s.step==="close_bdt"){d.endBdt=amount(text);if(!(d.endBdt>=0))throw Error("Enter a valid BDT amount.");s.step="close_usdt";return send(id,"Enter CURRENT USDT amount after this cycle.");}
+ if(s.step==="close_usdt"){d.endUsdt=amount(text);if(!(d.endUsdt>=0))throw Error("Enter a valid USDT amount.");await send(id,`CYCLE CLOSED & SNAPSHOT STORED\\nEnding BDT: ${d.endBdt.toFixed(2)}\\nEnding USDT: ${d.endUsdt.toFixed(2)}\\nTrade ledger preserved.\\nUse /starttrade for the next cycle.`);sessions.delete(String(id));return true;}
  return false;
 }
 export function startTelegramBot({getStatus,store}){
@@ -46,7 +48,7 @@ export function startTelegramBot({getStatus,store}){
   if(c==="/p2p"||c==="/price"||c==="/spread"){if(a.length<2){await send(id,"Usage: /p2p 126.80 127.70");continue;}const buy=amount(a[0]),sell=amount(a[1]),s=sessions.get(String(id)),d=s?.data||{};const raw=(sell-buy)/buy,methodBuy=benefits(d.method,"BUY",d.merchantOptional),methodSell=benefits(d.method,"SELL",d.merchantOptional),fixed=d.method==="BankTransfer"&&d.bankType==="OtherBank"?10:0,alloc=Math.min(d.capital||d.bdt||0,d.bdt||d.capital||0),profit=alloc*(raw+methodBuy+methodSell)-fixed;await send(id,`P2P ANALYSIS\nBest buy: ${buy.toFixed(2)}\nBest sell: ${sell.toFixed(2)}\nRaw spread: ${(raw*100).toFixed(3)}%\nMethod benefit: +${((methodBuy+methodSell)*100).toFixed(2)}%\nFixed expense: -${fixed.toFixed(2)} BDT\nEstimated cycle profit: ${profit.toFixed(2)} BDT\nEstimated return: ${alloc?((profit/alloc)*100).toFixed(3):"0.000"}%\nSignal: ${profit>0?"POSITIVE — REVIEW":"NO TRADE"}\nExecution requires human confirmation.`);continue;}
   if(c==="/balance"||c==="/report24"){const x=await getSummary(store);await send(id,`USDT LEDGER\nBought: ${x.bought_qty.toFixed(2)} @ ${x.average_buy_bdt.toFixed(2)}\nSold: ${x.sold_qty.toFixed(2)} @ ${x.average_sell_bdt.toFixed(2)}\nNet USDT: ${x.net_qty.toFixed(2)}\nGross cash difference: ${x.gross_bdt.toFixed(2)} BDT\nStorage: ${store.persistent?"persistent":"temporary"}`);continue;}
   if(c==="/status"){const x=getStatus();await send(id,`P2connect: ${x.status}\nBinance configured: ${x.binanceConfigured?"yes":"no"}\nSession: ${sessions.has(String(id))?"active":"none"}`);continue;}
-  if(c==="/stoptrade"){sessions.delete(String(id));await send(id,"Cycle stopped. Ledger preserved.");continue;}
+  if(c==="/stoptrade"){const s=sessions.get(String(id));if(!s){await send(id,"No active cycle.");continue;}s.step="close_bdt";await send(id,"CYCLE CLOSING\nEnter CURRENT BDT amount after this cycle.\nExamples: 50k | 1L | 1.25L");continue;}
   if(c==="/help"||c==="/start"){await send(id,"/starttrade /ads /p2p /buy /sell /balance /report24 /status /stoptrade");continue;}
   await send(id,"Unknown command. Use /help.");
  }catch(e){await send(id,`Error: ${e.message}`);}}}catch(e){console.error("Telegram:",e.message);await new Promise(r=>setTimeout(r,5000));}}})();
