@@ -1,4 +1,4 @@
-﻿import express from "express";
+import express from "express";
 import helmet from "helmet";
 import { rateLimit } from "express-rate-limit";
 
@@ -21,7 +21,8 @@ export function createApp() {
   function auth(req, res, next) {
     const expected = process.env.P2CONNECT_API_TOKEN;
     if (!expected) return res.status(503).json({ status: "CONFIGURATION_REQUIRED" });
-    if (req.get("authorization") !== `Bearer ${expected}`) return res.status(401).json({ error: "unauthorized" });
+    if (req.get("authorization") !== `Bearer ${expected}`)
+      return res.status(401).json({ error: "unauthorized" });
     next();
   }
 
