@@ -17,7 +17,7 @@ const FEE={
 function ask(s){return ["Capital amount (BDT)?","Target cycles today?","Payment method?\n"+METHODS.map((x,i)=>`${i+1}. ${x}`).join("\n"),"Current BDT amount?","Current USDT amount?"][s.step];}
 async function begin(chatId,send){
  sessions.set(String(chatId),{step:0,data:{},paused:false});
- await send(chatId,"P2P session initialized. I need 5 inputs.\n\n"+ask(0));
+ await send(chatId,"P2P session initialized. I need 5 inputs.\n\n"+ask({step:0}));
 }
 function parseMethod(v){const n=Number(v);if(n>=1&&n<=METHODS.length)return METHODS[n-1];const x=v.toLowerCase();return METHODS.find(m=>m.toLowerCase()===x)||null;}
 async function sessionInput(chatId,text,send){
@@ -64,3 +64,4 @@ export function startTelegramBot({getStatus,store}){
  }catch(e){console.error("Telegram polling error:",e.message);await new Promise(r=>setTimeout(r,5000));}}}
  loop();console.log("Telegram P2P control bot enabled");
 }
+
