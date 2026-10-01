@@ -1,0 +1,98 @@
+{
+  "workflow_name": "secure_service_deployment",
+  "version": "1.0.0",
+  "purpose": "Reusable pattern for deploying a private backend with GitHub, Render, and protected external API credentials.",
+  "principles": [
+    "Never commit secrets to source control.",
+    "Store runtime credentials only in the hosting provider's secret environment variables.",
+    "Use least-privilege API permissions.",
+    "Test locally before deployment.",
+    "Verify health, authentication, and external API access separately.",
+    "Stop before credential entry when user-controlled secrets are required."
+  ],
+  "stages": [
+    {
+      "id": "repo",
+      "name": "Repository setup",
+      "actions": [
+        "Create or identify a private GitHub repository.",
+        "Initialize application structure.",
+        "Add .gitignore and .env.example.",
+        "Do not place real credentials in files."
+      ],
+      "checkpoint": "Repository exists and contains no secrets."
+    },
+    {
+      "id": "backend",
+      "name": "Secure backend",
+      "actions": [
+        "Implement health endpoint.",
+        "Implement authentication middleware.",
+        "Implement external API adapter.",
+        "Restrict adapter to required permissions.",
+        "Add automated tests."
+      ],
+      "checkpoint": "Tests pass and protected endpoints reject unauthenticated requests."
+    },
+    {
+      "id": "render",
+      "name": "Hosting deployment",
+      "actions": [
+        "Connect private GitHub repository to Render.",
+        "Set the correct runtime.",
+        "Use npm ci for Node dependency installation.",
+        "Use npm start for application startup.",
+        "Configure health check.",
+        "Keep secrets as Render environment variables."
+      ],
+      "checkpoint": "Service reports deployed/running."
+    },
+    {
+      "id": "secrets",
+      "name": "Credential injection",
+      "actions": [
+        "Create only the required environment-variable names.",
+        "User enters secret values directly into Render.",
+        "Never paste or print secrets in chat, logs, commits, screenshots, or documentation."
+      ],
+      "checkpoint": "Required secrets exist in the hosting environment."
+    },
+    {
+      "id": "verification",
+      "name": "Post-deployment verification",
+      "actions": [
+        "Test /health.",
+        "Test authentication with an invalid token.",
+        "Test authentication with the valid token.",
+        "Test external API authentication.",
+        "Verify expected read-only behavior.",
+        "Verify prohibited capabilities remain unavailable."
+      ],
+      "checkpoint": "All verification tests pass."
+    },
+    {
+      "id": "handoff",
+      "name": "Reusable workflow handoff",
+      "actions": [
+        "Record repository, runtime, build command, start command, environment-variable names, endpoints, tests, and deployment status.",
+        "Convert the workflow into a template for the next automation."
+      ],
+      "checkpoint": "Runbook is stored with the project."
+    }
+  ],
+  "p2connect_instance": {
+    "repository": "acecareimmigration-blip/P2connect",
+    "runtime": "Node.js",
+    "build_command": "npm ci",
+    "start_command": "npm start",
+    "environment_variables": [
+      "BINANCE_API_KEY",
+      "BINANCE_PRIVATE_KEY",
+      "P2CONNECT_API_TOKEN"
+    ],
+    "deployment_region": "Singapore",
+    "service_plan": "Free",
+    "latest_known_commit": "2872c47",
+    "tests_at_deployment": "1 passed, 0 failed"
+  }
+}
