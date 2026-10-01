@@ -1,3 +1,5 @@
+[Reading 71 lines from start (total: 71 lines, 0 remaining)]
+
 [Reading 67 lines from start (total: 67 lines, 0 remaining)]
 
 import { calculateSignal } from "./signal.js";
@@ -9,37 +11,37 @@ function tg(token, method, body={}) {
   }).then(async r=>{const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.description||`Telegram HTTP ${r.status}`); return d.result;});
 }
 function allowed(id){const raw=process.env.TELEGRAM_ALLOWED_CHAT_IDS||"";return !raw.trim()||raw.split(",").map(x=>x.trim()).includes(String(id));}
-const METHODS=["BankTransfer","BkashMerchant","BkashAgent","NagadAgent","BkashPersonal","NagadPersonal"];
+const METHODS=["BankTransfer","BkashMerchant","BkashAgent","NagadAgent","BkashPersonal","NagadPersonal"];\nconst BANK_TYPES=["SameBank","OtherBank"];
 const sessions=new Map();
 const FEE={
  BankTransfer:{buy:0,sell:0}, BkashMerchant:{buy:0,sell:.018},
  BkashAgent:{buy:.004,sell:.004}, NagadAgent:{buy:.004,sell:.004},
  BkashPersonal:{buy:.007,sell:.007}, NagadPersonal:{buy:.007,sell:.007}
 };
-function ask(s){return ["Capital amount (BDT)?","Target cycles today?","Payment method?\n"+METHODS.map((x,i)=>`${i+1}. ${x}`).join("\n"),"Current BDT amount?","Current USDT amount?"][s.step];}
+function ask(s){return ["Capital amount (BDT)?","Target cycles today?","Payment method?\n"+METHODS.map((x,i)=>`${i+1}. ${x}`).join("\n"),"Bank transfer type?\n1. Same bank — 0 BDT fee\n2. Other bank — 10 BDT fee","Current BDT amount?","Current USDT amount?"][s.step];}
 async function begin(chatId,send){
  sessions.set(String(chatId),{step:0,data:{},paused:false});
  await send(chatId,"P2P session initialized. I need 5 inputs.\n\nCapital amount (BDT)?");
 }
-function parseMethod(v){const n=Number(v);if(n>=1&&n<=METHODS.length)return METHODS[n-1];const x=v.toLowerCase();return METHODS.find(m=>m.toLowerCase()===x)||null;}
+function parseMethod(v){const n=Number(v);if(n>=1&&n<=METHODS.length)return METHODS[n-1];const x=v.toLowerCase().replace(/[^a-z]/g,"");const aliases={"banktransfer":"BankTransfer","banktransferotherbank":"BankTransfer","banktransfersamebank":"BankTransfer","bkashmerchant":"BkashMerchant","bkashagent":"BkashAgent","nagadagent":"NagadAgent","bkashpersonal":"BkashPersonal","nagadpersonal":"NagadPersonal"};return aliases[x]||METHODS.find(m=>m.toLowerCase()===v.toLowerCase())||null;}
 async function sessionInput(chatId,text,send){
  const s=sessions.get(String(chatId)); if(!s)return false;
  if(text.startsWith("/"))return false;
  const d=s.data;
- if(s.step===0){d.capital=Number(text);if(!(d.capital>0))throw Error("Enter a valid BDT capital amount.");}
- if(s.step===1){d.cycles=Math.floor(Number(text));if(!(d.cycles>0))throw Error("Enter a valid target cycle count.");}
- if(s.step===2){d.method=parseMethod(text);if(!d.method)throw Error("Choose a method by number or exact name.");}
- if(s.step===3){d.bdt=Number(text);if(d.bdt<0)throw Error("Enter a valid BDT amount.");}
- if(s.step===4){d.usdt=Number(text);if(d.usdt<0)throw Error("Enter a valid USDT amount.");}
- s.step++;
- if(s.step<5){await send(chatId,ask(s));return true;}
- const f=FEE[d.method]||{buy:0,sell:0};
- d.fees=f;
- d.targetProfitBdt=d.capital*.01*d.cycles;
- await send(chatId,
-  `SESSION READY\nCapital: ${d.capital.toFixed(2)} BDT\nTarget cycles: ${d.cycles}\nMethod: ${d.method}\nStarting BDT: ${d.bdt.toFixed(2)}\nStarting USDT: ${d.usdt.toFixed(2)}\nMethod BUY cost: ${(f.buy*100).toFixed(2)}%\nMethod SELL cost: ${(f.sell*100).toFixed(2)}%\n1% target/cycle: ${(d.capital*.01).toFixed(2)} BDT\nIllustrative daily target: ${d.targetProfitBdt.toFixed(2)} BDT\n\nUse /p2p <buy> <sell> to analyze a cycle.\nUse /buy or /sell to record actual fills.\nUse /report24 for the session report.`);
- return true;
+ if(s.step===0){d.capital=Number(text);if(!(d.capital>0))throw Error("Enter a valid BDT capital amount.");s.step=1;await send(chatId,ask({step:1}));return true;}
+ if(s.step===1){d.cycles=Math.floor(Number(text));if(!(d.cycles>0))throw Error("Enter a valid target cycle count.");s.step=2;await send(chatId,ask({step:2}));return true;}
+ if(s.step===2){d.method=parseMethod(text);if(!d.method)throw Error("Choose a method by number or exact name.");if(d.method==="BankTransfer"){s.step=3;await send(chatId,ask({step:3}));}else{s.step=4;await send(chatId,ask({step:4}));}return true;}
+ if(s.step===3){const n=Number(text);if(n===1||/same/i.test(text))d.bankType="SameBank";else if(n===2||/other/i.test(text))d.bankType="OtherBank";else throw Error("Choose 1 for Same bank or 2 for Other bank.");d.bankFee=d.bankType==="OtherBank"?10:0;s.step=4;await send(chatId,ask({step:4}));return true;}
+ if(s.step===4){d.bdt=Number(text);if(d.bdt<0)throw Error("Enter a valid BDT amount.");s.step=5;await send(chatId,ask({step:5}));return true;}
+ if(s.step===5){d.usdt=Number(text);if(d.usdt<0)throw Error("Enter a valid USDT amount.");
+  const f=FEE[d.method]||{buy:0,sell:0};d.fees=f;d.targetProfitBdt=d.capital*.01*d.cycles;
+  const bankLine=d.method==="BankTransfer"?`\nBank type: ${d.bankType}\nFixed transfer fee: ${d.bankFee.toFixed(2)} BDT`:"";
+  await send(chatId,`SESSION READY\nCapital: ${d.capital.toFixed(2)} BDT\nTarget cycles: ${d.cycles}\nMethod: ${d.method}${bankLine}\nStarting BDT: ${d.bdt.toFixed(2)}\nStarting USDT: ${d.usdt.toFixed(2)}\nMethod BUY percentage cost: ${(f.buy*100).toFixed(2)}%\nMethod SELL percentage cost: ${(f.sell*100).toFixed(2)}%\n1% target/cycle: ${(d.capital*.01).toFixed(2)} BDT\nIllustrative daily target: ${d.targetProfitBdt.toFixed(2)} BDT\n\nUse /p2p <buy> <sell> to analyze a cycle.\nUse /buy or /sell to record actual fills.\nUse /report24 for the session report.`);
+  s.step=6;return true;
+ }
+ return false;
 }
+
 export function startTelegramBot({getStatus,store}){
  const token=process.env.TELEGRAM_BOT_TOKEN;if(!token){console.log("Telegram disabled");return;}
  let offset=0;
@@ -67,5 +69,7 @@ export function startTelegramBot({getStatus,store}){
  loop();console.log("Telegram P2P control bot enabled");
 }
 
+
+[executed on device: DESKTOP-9NBB4E3 (b3552ab2-7a45-4f09-83a8-bb7fd7363e4e)]
 
 [executed on device: DESKTOP-9NBB4E3 (b3552ab2-7a45-4f09-83a8-bb7fd7363e4e)]
