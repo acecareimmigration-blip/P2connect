@@ -1,0 +1,14 @@
+AUTHORITATIVE SOURCE HANDOFF
+Repository: acecareimmigration-blip/P2connect
+Branch: main
+Retrieved: 2026-10-02
+
+Verified GitHub SHAs:
+src/telegram.js 0dfccb433ea6ebe889cfa94b0a9a2de16b62b1e2
+src/ledger.js   7afd6cda49308498f9dc3ea35395056d764765f6
+src/index.js    1a002b79ca3f338044782eaa1df8fef924e0c82c
+package.json    c1f306041014ed16c2dcf7be1ce27258f365532c
+
+Use these production files as the base when integrating P2P_BRAIN_V1.
+Do not use the emergency handoff stubs as production source.
+No secrets included.
