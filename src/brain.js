@@ -49,8 +49,7 @@ function sanitizeParsedShape(input, rawText) {
     correction_target: parsed.correction_target ?? null,
     confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,
     missing_fields: Array.isArray(parsed.missing_fields) ? parsed.missing_fields : [],
-    clarification:
-      typeof parsed.clarification === "string" ? parsed.clarification.trim() : "",
+    clarification: typeof parsed.clarification === "string" ? parsed.clarification.trim() : "",
     raw_text: typeof parsed.raw_text === "string" ? parsed.raw_text : rawText,
   };
 }
@@ -100,7 +99,11 @@ export async function interpretTradeText(rawText, { signal } = {}) {
     return fallbackUnavailable(text, "missing_openai_api_key");
   }
 
-  const model = process.env.OPENAI_MODEL || "gpt-5-mini";
+  const model = process.env.OPENAI_MODEL;
+  if (!model) {
+    return fallbackUnavailable(text, "missing_openai_model");
+  }
+
   const instructions = [
     "You are a multilingual trade-message interpreter for Bengali accountants.",
     "Interpret only; never invent financial values.",
@@ -133,7 +136,7 @@ export async function interpretTradeText(rawText, { signal } = {}) {
   }
 
   if (!response.ok) {
-    return fallbackUnavailable(text, "openai_http_error");
+    return fallbackUnavailable(text, `openai_http_${response.status}`);
   }
 
   let payload;

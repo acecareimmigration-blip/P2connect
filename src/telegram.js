@@ -1,12 +1,14 @@
-import { recordTrade, getSummary, recordCycle, nextCycleId, getCycleReport } from "./ledger.js";
-import { parseTradeMessage, buildPendingPreview } from "./tradeParser.js";
+import { recordTrade, getSummary, recordCycle, nextCycleId } from "./ledger.js";
+import { buildPendingPreview, parseTradeMessage, parseTradeMessageFromAI } from "./tradeParser.js";
 
 const METHODS = ["BankTransfer", "BkashMerchant", "BkashAgent", "NagadAgent", "BkashPersonal", "NagadPersonal"];
 const SETTLEMENT = { Bank: 0, Bkash: 0.0185, Nagad: 0.015 };
+
 const sessions = new Map();
 const pinModes = new Set();
 const pendingFinancialByChat = new Map();
 const correctionModeByChat = new Set();
+const confirmedByCycle = new Map();
 
 function api(token, method, body = {}) {
   return fetch(`https://api.telegram.org/bot${token}/${method}`, {
@@ -21,8 +23,8 @@ function api(token, method, body = {}) {
 }
 
 function allowed(id) {
-  const ids = process.env.TELEGRAM_ALLOWED_CHAT_IDS || "";
-  return !ids.trim() || ids.split(",").map((value) => value.trim()).includes(String(id));
+  const value = process.env.TELEGRAM_ALLOWED_CHAT_IDS || "";
+  return !value.trim() || value.split(",").map((part) => part.trim()).includes(String(id));
 }
 
 function amount(value) {
@@ -35,7 +37,7 @@ function amount(value) {
 function method(value) {
   const index = Number(value);
   if (index >= 1 && index <= 6) return METHODS[index - 1];
-  const normalized = value.toLowerCase().replace(/[^a-z]/g, "");
+  const normalized = String(value).toLowerCase().replace(/[^a-z]/g, "");
   return {
     banktransfer: "BankTransfer",
     bkashmerchant: "BkashMerchant",
@@ -73,6 +75,233 @@ function calc(data) {
 function ready(data) {
   const x = calc(data);
   return `CYCLE READY\n\nCAPITAL: ৳${data.capital.toFixed(2)}\n\nBUY\n${data.buyMethod}${data.buyBankType ? ` (${data.buyBankType})` : ""} @ ${data.buyRate.toFixed(2)}\nUSDT acquired: ${x.usdt.toFixed(4)}\nMethod benefit: +৳${x.buyBenefit.toFixed(2)}\nFixed cost: -৳${x.buyFixed.toFixed(2)}\n\nSELL\n${data.sellMethod}${data.sellBankType ? ` (${data.sellBankType})` : ""} @ ${data.sellRate.toFixed(2)}\nGross proceeds: ৳${x.gross.toFixed(2)}\nMethod benefit: +৳${x.sellBenefit.toFixed(2)}\nFixed cost: -৳${x.sellFixed.toFixed(2)}\n\nSETTLEMENT: ${data.settlement}\nSettlement cost: -৳${x.settlementCost.toFixed(2)}\n\nPREDICTED NET PROFIT: ৳${x.net.toFixed(2)}\nPREDICTED RETURN: ${(x.margin * 100).toFixed(3)}%\n\nExecute manually, then record ACTUAL fills:\n/buy <USDT> <actual rate>\n/sell <USDT> <actual rate>\n\nFinish with /stoptrade`;
+}
+
+function trackConfirmedTrade(cycleId, side, quantity) {
+  const qty = Number(quantity);
+  if (!cycleId || !(qty > 0)) return;
+  const row = confirmedByCycle.get(cycleId) || { buy: 0, sell: 0 };
+  if (side === "BUY") row.buy += qty;
+  if (side === "SELL") row.sell += qty;
+  confirmedByCycle.set(cycleId, row);
+}
+
+function getTrackedCycleRemaining(cycleId) {
+  const row = confirmedByCycle.get(cycleId);
+  if (!row) return null;
+  return row.buy - row.sell;
+}
+
+async function getCycleRemainingUsdt(store, cycleId) {
+  if (!cycleId) return null;
+
+  if (store.persistent && store.pool) {
+    const result = await store.pool.query(
+      "SELECT side, COALESCE(SUM(quantity),0) AS quantity FROM p2p_trades WHERE cycle_id=$1 AND asset='USDT' GROUP BY side",
+      [cycleId],
+    );
+    const buy = Number(result.rows.find((row) => row.side === "BUY")?.quantity || 0);
+    const sell = Number(result.rows.find((row) => row.side === "SELL")?.quantity || 0);
+    return buy - sell;
+  }
+
+  return getTrackedCycleRemaining(cycleId);
+}
+
+function sellRestRequested(text) {
+  const normalized = String(text || "").toLowerCase();
+  return /\bsell\s+rest\b/.test(normalized) || /\bsell\s+remaining\b/.test(normalized);
+}
+
+function mergePendingParsed(existingParsed, nextParsed) {
+  const merged = { ...(existingParsed || {}) };
+  const candidate = nextParsed || {};
+
+  if (candidate.intent === "BUY" || candidate.intent === "SELL") {
+    merged.intent = candidate.intent;
+  }
+
+  const overrideFields = [
+    "quantity_usdt",
+    "rate_bdt",
+    "amount_bdt",
+    "payment_method",
+    "settlement_method",
+    "correction_target",
+  ];
+
+  for (const field of overrideFields) {
+    const value = candidate[field];
+    if (value !== null && value !== undefined && value !== "") {
+      merged[field] = value;
+    }
+  }
+
+  return merged;
+}
+
+function oneClarificationQuestion(parsed) {
+  if (parsed?.clarification) return parsed.clarification;
+  const missing = Array.isArray(parsed?.missing_fields) ? parsed.missing_fields : [];
+  if (missing.includes("payment_method")) {
+    return "Which payment method? (BankTransfer / bKash Merchant-Agent-Personal / Nagad Agent-Personal)";
+  }
+  if (missing.includes("quantity_usdt")) return "How much USDT?";
+  if (missing.includes("rate_bdt")) return "What rate (BDT/USDT)?";
+  if (missing.includes("amount_bdt")) return "What amount in BDT?";
+  if (missing.includes("correction_target")) return "Which previous trade should be corrected?";
+  return "Please provide the missing transaction detail.";
+}
+
+function composePendingRaw(existingRaw, nextText) {
+  const previous = String(existingRaw || "").trim();
+  const current = String(nextText || "").trim();
+  if (!previous) return current;
+  if (!current) return previous;
+  return `${previous} | ${current}`;
+}
+
+function hasMissing(parsed) {
+  return Array.isArray(parsed?.missing_fields) && parsed.missing_fields.length > 0;
+}
+
+async function sendPendingPreview(chatId, send, cycleId, parsed) {
+  const preview = buildPendingPreview(cycleId || "NO ACTIVE CYCLE", parsed);
+  await send(chatId, preview, {
+    inline_keyboard: [[
+      { text: "✅ CONFIRM", callback_data: "p2p_confirm" },
+      { text: "✏️ CORRECT", callback_data: "p2p_correct" },
+      { text: "❌ CANCEL", callback_data: "p2p_cancel" },
+    ]],
+  });
+}
+
+async function parseAndMaybeMergePending(chatId, text, send, store) {
+  const key = String(chatId);
+  const existingPending = pendingFinancialByChat.get(key);
+  const correctionMode = correctionModeByChat.has(key);
+  const activeSession = sessions.get(key);
+  const activeCycleId = activeSession?.data?.cycleId || existingPending?.cycleId || null;
+
+  const canContinue = Boolean(existingPending && (correctionMode || hasMissing(existingPending.parsed)));
+  if (existingPending && !canContinue) {
+    await send(chatId, "You already have a pending transaction. Use ✅ CONFIRM, ✏️ CORRECT, or ❌ CANCEL.");
+    return true;
+  }
+
+  const brain = await parseTradeMessage(text);
+  if (!brain.ok) {
+    console.error(`[P2P_BRAIN] parse_unavailable chat=${chatId} reason=${brain.reason || "unknown"}`);
+    await send(chatId, "AI parsing is temporarily unavailable. Use manual /buy and /sell commands.");
+    return true;
+  }
+
+  let parsed = brain.parsed;
+  let pendingCycleId = activeCycleId;
+  let rawText = text;
+
+  if (canContinue) {
+    const merged = mergePendingParsed(existingPending.parsed, parsed);
+    rawText = composePendingRaw(existingPending.raw_text, text);
+    parsed = parseTradeMessageFromAI(rawText, merged).parsed;
+    pendingCycleId = existingPending.cycleId || activeCycleId;
+  }
+
+  if (parsed.intent === "SELL" && (!parsed.quantity_usdt || parsed.missing_fields.includes("quantity_usdt")) && sellRestRequested(text)) {
+    if (!pendingCycleId) {
+      await send(chatId, "NO ACTIVE CYCLE. Start a cycle before using sell rest.");
+      return true;
+    }
+
+    const remaining = await getCycleRemainingUsdt(store, pendingCycleId);
+    if (!(Number.isFinite(remaining) && remaining > 0)) {
+      await send(chatId, "No confirmed remaining USDT is available in the active cycle.");
+      return true;
+    }
+
+    parsed = parseTradeMessageFromAI(rawText, { ...parsed, quantity_usdt: remaining }).parsed;
+  }
+
+  if (parsed.intent === "COST" || parsed.intent === "CORRECTION") {
+    await send(chatId, "Captured, but this requires the dedicated audit-ledger extension. Nothing has been recorded.");
+    correctionModeByChat.delete(key);
+    return true;
+  }
+
+  const tradeIntent = parsed.intent === "BUY" || parsed.intent === "SELL";
+  if (!tradeIntent) {
+    if (existingPending && canContinue) {
+      await send(chatId, oneClarificationQuestion(existingPending.parsed));
+      return true;
+    }
+    await send(chatId, parsed.clarification || "Please send a BUY/SELL message or use /help.");
+    return true;
+  }
+
+  const pending = {
+    parsed,
+    raw_text: rawText,
+    cycleId: pendingCycleId,
+  };
+  pendingFinancialByChat.set(key, pending);
+
+  if (hasMissing(parsed)) {
+    correctionModeByChat.delete(key);
+    await send(chatId, oneClarificationQuestion(parsed));
+    return true;
+  }
+
+  correctionModeByChat.delete(key);
+  await sendPendingPreview(chatId, send, pendingCycleId, parsed);
+  return true;
+}
+
+async function handleBrainCallback(chatId, action, send, store) {
+  const key = String(chatId);
+  const pending = pendingFinancialByChat.get(key);
+
+  if (action === "p2p_cancel") {
+    pendingFinancialByChat.delete(key);
+    correctionModeByChat.delete(key);
+    await send(chatId, "Pending transaction canceled. Nothing was recorded.");
+    return true;
+  }
+
+  if (!pending) {
+    await send(chatId, "No pending transaction found.");
+    return true;
+  }
+
+  if (action === "p2p_correct") {
+    correctionModeByChat.add(key);
+    await send(chatId, "Send corrected details (partial is fine, e.g. bKash Personal or rate 126.70). ");
+    return true;
+  }
+
+  if (action === "p2p_confirm") {
+    const parsed = pending.parsed;
+    if (!(parsed.intent === "BUY" || parsed.intent === "SELL") || !parsed.confirmable || hasMissing(parsed)) {
+      await send(chatId, "Pending transaction is not confirmable yet. Use ✏️ CORRECT.");
+      return true;
+    }
+
+    const record = await recordTrade(store, {
+      cycleId: pending.cycleId || null,
+      side: parsed.intent,
+      quantity: parsed.quantity_usdt,
+      price_bdt: parsed.rate_bdt,
+      note: pending.raw_text || parsed.raw_text || "brain-confirmed",
+    });
+
+    trackConfirmedTrade(pending.cycleId, record.side, record.quantity);
+    pendingFinancialByChat.delete(key);
+    correctionModeByChat.delete(key);
+
+    await send(chatId, `ACTUAL TRADE STORED\n${record.side}: ${record.quantity.toFixed(4)} USDT @ ${record.price_bdt.toFixed(2)}\nBDT value: ৳${record.total_bdt.toFixed(2)}`);
+    return true;
+  }
+
+  return false;
 }
 
 async function input(chatId, text, send, store) {
@@ -170,8 +399,11 @@ async function input(chatId, text, send, store) {
   if (session.step === "close_usdt") {
     data.endUsdt = amount(text);
     if (!(data.endUsdt >= 0)) throw Error("Enter current USDT.");
+
     const x = calc(data);
-    const cycleId = `P2P-${Date.now()}`;
+    const cycleId = data.cycleId;
+    if (!cycleId) throw Error("No active AC cycle ID found.");
+
     await recordCycle(store, {
       cycleId,
       startedAt: session.startedAt,
@@ -195,141 +427,6 @@ async function input(chatId, text, send, store) {
   return false;
 }
 
-function sellRestRequested(text) {
-  const normalized = String(text || "").toLowerCase();
-  return /\bsell\s+rest\b/.test(normalized) || /\bsell\s+remaining\b/.test(normalized);
-}
-
-function updateParsedSellQuantity(parsed, quantity) {
-  const rate = Number(parsed.rate_bdt);
-  parsed.quantity_usdt = quantity;
-  parsed.missing_fields = Array.isArray(parsed.missing_fields)
-    ? parsed.missing_fields.filter((field) => field !== "quantity_usdt")
-    : [];
-
-  if (Number.isFinite(quantity) && quantity > 0 && Number.isFinite(rate) && rate > 0) {
-    parsed.bdt_value = quantity * rate;
-    parsed.confirmable = true;
-  } else {
-    parsed.confirmable = false;
-  }
-}
-
-async function routeMessageToBrain(chatId, text, send, store) {
-  const key = String(chatId);
-  const hasPending = pendingFinancialByChat.has(key);
-  const correctionMode = correctionModeByChat.has(key);
-
-  if (hasPending && !correctionMode) {
-    await send(chatId, "You already have a pending transaction. Use ✅ CONFIRM, ✏️ CORRECT, or ❌ CANCEL.");
-    return true;
-  }
-
-  const brain = await parseTradeMessage(text);
-  if (!brain.ok) {
-    await send(chatId, "AI parsing is temporarily unavailable. Use /buy or /sell manual commands.");
-    return true;
-  }
-
-  const parsed = brain.parsed;
-
-  if (parsed.intent === "SELL" && sellRestRequested(text) && (!parsed.quantity_usdt || parsed.missing_fields.includes("quantity_usdt"))) {
-    const summary = await getSummary(store);
-    const remaining = Number(summary.net_qty);
-    if (!(remaining > 0)) {
-      await send(chatId, "No remaining confirmed USDT is available to sell.");
-      return true;
-    }
-    updateParsedSellQuantity(parsed, remaining);
-  }
-
-  if (parsed.intent === "COST" || parsed.intent === "CORRECTION") {
-    await send(chatId, "Captured, but this requires the dedicated audit-ledger extension. Nothing has been recorded.");
-    correctionModeByChat.delete(key);
-    return true;
-  }
-
-  if (parsed.intent !== "BUY" && parsed.intent !== "SELL") {
-    if (parsed.clarification) {
-      await send(chatId, parsed.clarification);
-    } else {
-      await send(chatId, "Please use /help, /buy, /sell, or /starttrade.");
-    }
-    correctionModeByChat.delete(key);
-    return true;
-  }
-
-  if ((parsed.missing_fields || []).length > 0) {
-    await send(chatId, parsed.clarification || "Please provide missing transaction details.");
-    return true;
-  }
-
-  const active = sessions.get(key);
-  const pending = {
-    parsed,
-    raw_text: text,
-    cycleId: active?.data?.cycleId || null,
-  };
-  pendingFinancialByChat.set(key, pending);
-  correctionModeByChat.delete(key);
-
-  const preview = buildPendingPreview(pending.cycleId || "ACxxxx", parsed);
-  await send(chatId, preview, {
-    inline_keyboard: [[
-      { text: "✅ CONFIRM", callback_data: "p2p_confirm" },
-      { text: "✏️ CORRECT", callback_data: "p2p_correct" },
-      { text: "❌ CANCEL", callback_data: "p2p_cancel" },
-    ]],
-  });
-  return true;
-}
-
-async function handleBrainCallback(chatId, action, send, store) {
-  const key = String(chatId);
-  const pending = pendingFinancialByChat.get(key);
-
-  if (action === "p2p_cancel") {
-    pendingFinancialByChat.delete(key);
-    correctionModeByChat.delete(key);
-    await send(chatId, "Pending transaction canceled. Nothing was recorded.");
-    return true;
-  }
-
-  if (!pending) {
-    await send(chatId, "No pending transaction found.");
-    return true;
-  }
-
-  if (action === "p2p_correct") {
-    correctionModeByChat.add(key);
-    await send(chatId, "Send corrected transaction text.");
-    return true;
-  }
-
-  if (action === "p2p_confirm") {
-    const parsed = pending.parsed;
-    if (!(parsed.intent === "BUY" || parsed.intent === "SELL") || !parsed.confirmable) {
-      await send(chatId, "Pending transaction is not confirmable yet. Use ✏️ CORRECT.");
-      return true;
-    }
-
-    const record = await recordTrade(store, {
-      cycleId: pending.cycleId || null,
-      side: parsed.intent,
-      quantity: parsed.quantity_usdt,
-      price_bdt: parsed.rate_bdt,
-      note: parsed.raw_text || pending.raw_text || "brain-confirmed",
-    });
-
-    pendingFinancialByChat.delete(key);
-    correctionModeByChat.delete(key);
-    await send(chatId, `ACTUAL TRADE STORED\n${record.side}: ${record.quantity.toFixed(4)} USDT @ ${record.price_bdt.toFixed(2)}\nBDT value: ৳${record.total_bdt.toFixed(2)}`);
-    return true;
-  }
-
-  return false;
-}
-
 export function startTelegramBot({ getStatus, store }) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) return;
@@ -340,7 +437,11 @@ export function startTelegramBot({ getStatus, store }) {
   (async () => {
     while (true) {
       try {
-        const updates = await api(token, "getUpdates", { offset, timeout: 25, allowed_updates: ["message", "callback_query"] });
+        const updates = await api(token, "getUpdates", {
+          offset,
+          timeout: 25,
+          allowed_updates: ["message", "callback_query"],
+        });
 
         for (const update of updates) {
           offset = update.update_id + 1;
@@ -358,7 +459,11 @@ export function startTelegramBot({ getStatus, store }) {
               }
 
               if (action === "starttrade") {
-                sessions.set(String(chatId), { step: "capital", startedAt: new Date().toISOString(), data: { cycleId: await nextCycleId(store) } });
+                sessions.set(String(chatId), {
+                  step: "capital",
+                  startedAt: new Date().toISOString(),
+                  data: { cycleId: await nextCycleId(store) },
+                });
                 await send(chatId, "P2P CYCLE SETUP\nCapital amount?\nExamples: 50k = ৳50,000 | 1L = ৳100,000 | 1.25L = ৳125,000");
               } else if (action === "continue") {
                 const session = sessions.get(String(chatId));
@@ -385,7 +490,11 @@ export function startTelegramBot({ getStatus, store }) {
               pinModes.delete(String(chatId));
               const posted = await send(chatId, `PINNED INSTRUCTIONS\n\n${text}`);
               try {
-                await api(token, "pinChatMessage", { chat_id: chatId, message_id: posted.message_id, disable_notification: true });
+                await api(token, "pinChatMessage", {
+                  chat_id: chatId,
+                  message_id: posted.message_id,
+                  disable_notification: true,
+                });
               } catch {
                 await send(chatId, "Instruction saved, but I could not pin it. Make the bot an admin with permission to pin messages.");
               }
@@ -397,10 +506,8 @@ export function startTelegramBot({ getStatus, store }) {
               continue;
             }
 
-            if (!text.startsWith("/")) {
-              if (await routeMessageToBrain(chatId, text, send, store)) {
-                continue;
-              }
+            if (!text.startsWith("/") && (await parseAndMaybeMergePending(chatId, text, send, store))) {
+              continue;
             }
 
             if (command === "/pininstructions") {
@@ -422,7 +529,11 @@ export function startTelegramBot({ getStatus, store }) {
             }
 
             if (command === "/starttrade") {
-              sessions.set(String(chatId), { step: "capital", startedAt: new Date().toISOString(), data: { cycleId: await nextCycleId(store) } });
+              sessions.set(String(chatId), {
+                step: "capital",
+                startedAt: new Date().toISOString(),
+                data: { cycleId: await nextCycleId(store) },
+              });
               await send(chatId, `P2P CYCLE SETUP\nCycle ID: ${sessions.get(String(chatId)).data.cycleId}\nCapital amount?\nExamples: 50k = ৳50,000 | 1L = ৳100,000 | 1.25L = ৳125,000`);
               continue;
             }
@@ -437,6 +548,7 @@ export function startTelegramBot({ getStatus, store }) {
                 price_bdt: Number(args[1]),
                 note: args.slice(2).join(" "),
               });
+              trackConfirmedTrade(active?.data?.cycleId || null, record.side, record.quantity);
               await send(chatId, `ACTUAL TRADE STORED\n${record.side}: ${record.quantity.toFixed(4)} USDT @ ${record.price_bdt.toFixed(2)}\nBDT value: ৳${record.total_bdt.toFixed(2)}`);
               continue;
             }
@@ -473,24 +585,24 @@ export function startTelegramBot({ getStatus, store }) {
             }
 
             if (command === "/help" || command === "/start") {
-              const posted = await send(
-                chatId,
-                "P2P TRADE CONTROL\n\nUse the buttons below to start/continue a cycle or view the ledger.\n\nManual instructions: /pininstructions",
-                {
-                  inline_keyboard: [
-                    [
-                      { text: "▶ Start Trade", callback_data: "starttrade" },
-                      { text: "↪ Continue", callback_data: "continue" },
-                    ],
-                    [
-                      { text: "📊 Report", callback_data: "report" },
-                      { text: "❓ Help", callback_data: "help" },
-                    ],
+              const posted = await send(chatId, "P2P TRADE CONTROL\n\nUse the buttons below to start/continue a cycle or view the ledger.\n\nManual instructions: /pininstructions", {
+                inline_keyboard: [
+                  [
+                    { text: "▶ Start Trade", callback_data: "starttrade" },
+                    { text: "↪ Continue", callback_data: "continue" },
                   ],
-                },
-              );
+                  [
+                    { text: "📊 Report", callback_data: "report" },
+                    { text: "❓ Help", callback_data: "help" },
+                  ],
+                ],
+              });
               try {
-                await api(token, "pinChatMessage", { chat_id: chatId, message_id: posted.message_id, disable_notification: true });
+                await api(token, "pinChatMessage", {
+                  chat_id: chatId,
+                  message_id: posted.message_id,
+                  disable_notification: true,
+                });
               } catch {
                 // ignore pin failure
               }

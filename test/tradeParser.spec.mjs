@@ -68,6 +68,17 @@ function run() {
     assert.match(preview, /AC0007 — PENDING/);
     assert.match(preview, /Nothing has been recorded yet\./);
   }
+
+  {
+    const preview = buildPendingPreview(null, {
+      intent: "BUY",
+      quantity_usdt: 100,
+      rate_bdt: 120,
+      bdt_value: 12000,
+      payment_method: "BankTransfer",
+    });
+    assert.match(preview, /NO ACTIVE CYCLE — PENDING/);
+  }
 }
 
 run();
