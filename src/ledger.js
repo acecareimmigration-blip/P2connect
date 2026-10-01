@@ -9,6 +9,12 @@ export async function initLedger() {
     quantity NUMERIC NOT NULL, price_bdt NUMERIC NOT NULL,
     total_bdt NUMERIC NOT NULL, note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS p2p_cycles (
+    id BIGSERIAL PRIMARY KEY, cycle_id TEXT NOT NULL, started_at TIMESTAMPTZ NOT NULL,
+    ended_at TIMESTAMPTZ, side TEXT NOT NULL, payment_method TEXT NOT NULL, bank_type TEXT,
+    capital_bdt NUMERIC NOT NULL, start_bdt NUMERIC, start_usdt NUMERIC, end_bdt NUMERIC, end_usdt NUMERIC,
+    expected_profit_bdt NUMERIC, actual_profit_bdt NUMERIC, status TEXT NOT NULL, notes TEXT
+  )`);
   return { persistent: true, pool };
 }
 
@@ -46,4 +52,16 @@ export async function getSummary(store, asset = "USDT") {
     average_sell_bdt:sell.quantity?Number(sell.total_bdt)/Number(sell.quantity):0,
     gross_bdt:Number(sell.total_bdt)-Number(buy.total_bdt)
   };
+}
+
+export async function recordCycle(store, cycle) {
+  const required = ["cycleId","startedAt","side","paymentMethod","capitalBdt","status"];
+  for (const k of required) if (cycle[k] === undefined || cycle[k] === null) throw new Error(`Missing cycle field: ${k}`);
+  if (!store.persistent) return { ...cycle, persisted: false };
+  const r = await store.pool.query(
+    `INSERT INTO p2p_cycles(cycle_id,started_at,ended_at,side,payment_method,bank_type,capital_bdt,start_bdt,start_usdt,end_bdt,end_usdt,expected_profit_bdt,actual_profit_bdt,status,notes)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+    [cycle.cycleId,cycle.startedAt,cycle.endedAt||null,cycle.side,cycle.paymentMethod,cycle.bankType||null,cycle.capitalBdt,cycle.startBdt??null,cycle.startUsdt??null,cycle.endBdt??null,cycle.endUsdt??null,cycle.expectedProfitBdt??null,cycle.actualProfitBdt??null,cycle.status,cycle.notes||null]
+  );
+  return { ...cycle, dbId:r.rows[0].id, persisted:true };
 }
