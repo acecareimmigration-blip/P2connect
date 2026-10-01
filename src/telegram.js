@@ -1,75 +1,54 @@
-[Reading 71 lines from start (total: 71 lines, 0 remaining)]
-
-[Reading 67 lines from start (total: 67 lines, 0 remaining)]
-
-import { calculateSignal } from "./signal.js";
 import { recordTrade, getSummary } from "./ledger.js";
 
-function tg(token, method, body={}) {
-  return fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(body)
-  }).then(async r=>{const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.description||`Telegram HTTP ${r.status}`); return d.result;});
-}
-function allowed(id){const raw=process.env.TELEGRAM_ALLOWED_CHAT_IDS||"";return !raw.trim()||raw.split(",").map(x=>x.trim()).includes(String(id));}
-const METHODS=["BankTransfer","BkashMerchant","BkashAgent","NagadAgent","BkashPersonal","NagadPersonal"];\nconst BANK_TYPES=["SameBank","OtherBank"];
+function api(token,method,body={}){return fetch(`https://api.telegram.org/bot${token}/${method}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)}).then(async r=>{const x=await r.json();if(!r.ok||!x.ok)throw Error(x.description||"Telegram error");return x.result;});}
+function allowed(id){const x=process.env.TELEGRAM_ALLOWED_CHAT_IDS||"";return !x.trim()||x.split(",").map(v=>v.trim()).includes(String(id));}
 const sessions=new Map();
-const FEE={
- BankTransfer:{buy:0,sell:0}, BkashMerchant:{buy:0,sell:.018},
- BkashAgent:{buy:.004,sell:.004}, NagadAgent:{buy:.004,sell:.004},
- BkashPersonal:{buy:.007,sell:.007}, NagadPersonal:{buy:.007,sell:.007}
-};
-function ask(s){return ["Capital amount (BDT)?","Target cycles today?","Payment method?\n"+METHODS.map((x,i)=>`${i+1}. ${x}`).join("\n"),"Bank transfer type?\n1. Same bank — 0 BDT fee\n2. Other bank — 10 BDT fee","Current BDT amount?","Current USDT amount?"][s.step];}
-async function begin(chatId,send){
- sessions.set(String(chatId),{step:0,data:{},paused:false});
- await send(chatId,"P2P session initialized. I need 5 inputs.\n\nCapital amount (BDT)?");
+const METHODS=["BankTransfer","BkashMerchant","BkashAgent","NagadAgent","BkashPersonal","NagadPersonal"];
+function amount(v){const x=String(v).trim().toLowerCase().replace(/,/g,"");const m=x.match(/^([0-9]+(?:\.[0-9]+)?)\s*(k|l|lac|lakh)?$/);if(!m)return NaN;const n=Number(m[1]);return n*(m[2]==="k"?1000:["l","lac","lakh"].includes(m[2])?100000:1);}
+function method(v){const n=Number(v);if(n>=1&&n<=6)return METHODS[n-1];const x=v.toLowerCase().replace(/[^a-z]/g,"");return {banktransfer:"BankTransfer",bkashmerchant:"BkashMerchant",bkashagent:"BkashAgent",nagadagent:"NagadAgent",bkashpersonal:"BkashPersonal",nagadpersonal:"NagadPersonal"}[x];}
+function benefits(m,side,optionalMerchant=false){
+ if(m==="BankTransfer")return 0;
+ if(m==="BkashAgent"||m==="NagadAgent")return .004;
+ if(m==="BkashPersonal"||m==="NagadPersonal")return side==="SELL"?.007:0;
+ if(m==="BkashMerchant")return side==="SELL"?(optionalMerchant?.018:.004):0;
+ return 0;
 }
-function parseMethod(v){const n=Number(v);if(n>=1&&n<=METHODS.length)return METHODS[n-1];const x=v.toLowerCase().replace(/[^a-z]/g,"");const aliases={"banktransfer":"BankTransfer","banktransferotherbank":"BankTransfer","banktransfersamebank":"BankTransfer","bkashmerchant":"BkashMerchant","bkashagent":"BkashAgent","nagadagent":"NagadAgent","bkashpersonal":"BkashPersonal","nagadpersonal":"NagadPersonal"};return aliases[x]||METHODS.find(m=>m.toLowerCase()===v.toLowerCase())||null;}
-async function sessionInput(chatId,text,send){
- const s=sessions.get(String(chatId)); if(!s)return false;
- if(text.startsWith("/"))return false;
- const d=s.data;
- if(s.step===0){d.capital=Number(text);if(!(d.capital>0))throw Error("Enter a valid BDT capital amount.");s.step=1;await send(chatId,ask({step:1}));return true;}
- if(s.step===1){d.cycles=Math.floor(Number(text));if(!(d.cycles>0))throw Error("Enter a valid target cycle count.");s.step=2;await send(chatId,ask({step:2}));return true;}
- if(s.step===2){d.method=parseMethod(text);if(!d.method)throw Error("Choose a method by number or exact name.");if(d.method==="BankTransfer"){s.step=3;await send(chatId,ask({step:3}));}else{s.step=4;await send(chatId,ask({step:4}));}return true;}
- if(s.step===3){const n=Number(text);if(n===1||/same/i.test(text))d.bankType="SameBank";else if(n===2||/other/i.test(text))d.bankType="OtherBank";else throw Error("Choose 1 for Same bank or 2 for Other bank.");d.bankFee=d.bankType==="OtherBank"?10:0;s.step=4;await send(chatId,ask({step:4}));return true;}
- if(s.step===4){d.bdt=Number(text);if(d.bdt<0)throw Error("Enter a valid BDT amount.");s.step=5;await send(chatId,ask({step:5}));return true;}
- if(s.step===5){d.usdt=Number(text);if(d.usdt<0)throw Error("Enter a valid USDT amount.");
-  const f=FEE[d.method]||{buy:0,sell:0};d.fees=f;d.targetProfitBdt=d.capital*.01*d.cycles;
-  const bankLine=d.method==="BankTransfer"?`\nBank type: ${d.bankType}\nFixed transfer fee: ${d.bankFee.toFixed(2)} BDT`:"";
-  await send(chatId,`SESSION READY\nCapital: ${d.capital.toFixed(2)} BDT\nTarget cycles: ${d.cycles}\nMethod: ${d.method}${bankLine}\nStarting BDT: ${d.bdt.toFixed(2)}\nStarting USDT: ${d.usdt.toFixed(2)}\nMethod BUY percentage cost: ${(f.buy*100).toFixed(2)}%\nMethod SELL percentage cost: ${(f.sell*100).toFixed(2)}%\n1% target/cycle: ${(d.capital*.01).toFixed(2)} BDT\nIllustrative daily target: ${d.targetProfitBdt.toFixed(2)} BDT\n\nUse /p2p <buy> <sell> to analyze a cycle.\nUse /buy or /sell to record actual fills.\nUse /report24 for the session report.`);
-  s.step=6;return true;
- }
+function cycleEstimate(d){
+ const deployed=Math.min(d.capital,d.bdt||d.capital);
+ const methodProfit=deployed*benefits(d.method,d.side,d.merchantOptional);
+ const fixed=d.method==="BankTransfer"&&d.bankType==="OtherBank"?10:0;
+ const target=deployed*.01;
+ return {deployed,methodProfit,fixed,target,predicted:target+methodProfit-fixed};
+}
+function cycleReady(d){
+ const e=cycleEstimate(d);
+ return `CYCLE READY\nSide: ${d.side}\nCapital available: ${d.capital.toFixed(2)} BDT\nCycle allocation: ${e.deployed.toFixed(2)} BDT\nTarget cycles: ${d.cycles}\nMethod: ${d.method}${d.bankType?` (${d.bankType})`:""}\nCurrent BDT: ${d.bdt.toFixed(2)}\nCurrent USDT: ${d.usdt.toFixed(2)}\n\n1% market target: ${e.target.toFixed(2)} BDT\nMethod profit: +${e.methodProfit.toFixed(2)} BDT\nMethod expense: -${e.fixed.toFixed(2)} BDT\nPredicted profit: ${e.predicted.toFixed(2)} BDT\n\nMARKET INPUT REQUIRED\nSend /ads then type the current top BUY/SELL ad prices, or send a Binance P2P screenshot for manual analysis.\n\nRecord a fill with:\n/${d.side.toLowerCase()} <USDT amount> <price>\nExample: /${d.side.toLowerCase()} 393.70 127.00`;}
+async function input(id,text,send){
+ const s=sessions.get(String(id)),d=s.data;
+ if(s.step==="capital"){d.capital=amount(text);if(!(d.capital>0))throw Error("Use e.g. 50k, 1L, 1.25L or 125000.");s.step="cycles";return send(id,"Target cycles today?");}
+ if(s.step==="cycles"){d.cycles=Math.floor(Number(text));if(!(d.cycles>0))throw Error("Enter a valid cycle count.");s.step="side";return send(id,"Cycle side?\n1. BUY USDT\n2. SELL USDT");}
+ if(s.step==="side"){d.side=/^(1|buy)$/i.test(text)?"BUY":/^(2|sell)$/i.test(text)?"SELL":null;if(!d.side)throw Error("Choose 1/BUY or 2/SELL.");s.step="method";return send(id,"Payment method?\n1. BankTransfer\n2. BkashMerchant\n3. BkashAgent\n4. NagadAgent\n5. BkashPersonal\n6. NagadPersonal");}
+ if(s.step==="method"){d.method=method(text);if(!d.method)throw Error("Choose 1-6 or method name.");if(d.method==="BankTransfer"){s.step="bank";return send(id,"Bank transfer type?\n1. Same bank — 0 BDT\n2. Other bank — 10 BDT");}if(d.method==="BkashMerchant"&&d.side==="SELL"){s.step="merchant";return send(id,"bKash Merchant return structure?\n1. Standard +0.40%\n2. Optional +1.80%");}s.step="bdt";return send(id,"Current BDT amount? (50k / 1L / 1.25L accepted)");}
+ if(s.step==="bank"){d.bankType=/^(1|same|samebank)$/i.test(text)?"SameBank":/^(2|other|otherbank)$/i.test(text)?"OtherBank":null;if(!d.bankType)throw Error("Choose 1 Same bank or 2 Other bank.");s.step="bdt";return send(id,"Current BDT amount?");}
+ if(s.step==="merchant"){d.merchantOptional=/^(2|optional)$/i.test(text);s.step="bdt";return send(id,"Current BDT amount?");}
+ if(s.step==="bdt"){d.bdt=amount(text);if(!(d.bdt>=0))throw Error("Use e.g. 50k, 1L, 1.25L or 125000.");s.step="usdt";return send(id,"Current USDT amount?");}
+ if(s.step==="usdt"){d.usdt=amount(text);if(!(d.usdt>=0))throw Error("Enter current USDT amount.");s.step="ready";return send(id,cycleReady(d));}
  return false;
 }
-
 export function startTelegramBot({getStatus,store}){
- const token=process.env.TELEGRAM_BOT_TOKEN;if(!token){console.log("Telegram disabled");return;}
- let offset=0;
- async function send(id,text){return tg(token,"sendMessage",{chat_id:id,text});}
- async function loop(){while(true){try{
-  const updates=await tg(token,"getUpdates",{offset,timeout:25,allowed_updates:["message"]});
-  for(const u of updates){offset=u.update_id+1;const m=u.message;if(!m?.chat?.id||!m.text||!allowed(m.chat.id))continue;
-   const id=m.chat.id,text=m.text.trim(),parts=text.split(/\s+/),c=parts[0].toLowerCase(),a=parts.slice(1);
-   try{
-    if(sessions.has(String(id))&& !text.startsWith("/")){await sessionInput(id,text,send);continue;}
-    if(c==="/starttrade"){await begin(id,send);continue;}
-    if(c==="/help"||c==="/start"){await send(id,"P2connect P2P Control\n/starttrade\n/status\n/price <buy> <sell> [fee]\n/spread <buy> <sell> [fee]\n/p2p <buy> <sell> [fee]\n/buy <USDT> <BDT> [note]\n/sell <USDT> <BDT> [note]\n/balance\n/report24\n/pause\n/resume\n/stoptrade");continue;}
-    if(c==="/status"){const x=getStatus();await send(id,`P2connect: ${x.status}\nBinance configured: ${x.binanceConfigured?"yes":"no"}\nSession: ${sessions.has(String(id))?"active":"none"}`);continue;}
-    if(c==="/chatid"){await send(id,`Chat ID: ${id}`);continue;}
-    if(c==="/pause"){const s=sessions.get(String(id));if(s)s.paused=true;await send(id,"P2P session PAUSED. No new trade signal should be acted on.");continue;}
-    if(c==="/resume"){const s=sessions.get(String(id));if(s)s.paused=false;await send(id,"P2P session RESUMED.");continue;}
-    if(c==="/stoptrade"){sessions.delete(String(id));await send(id,"P2P session stopped. Existing ledger records are preserved.");continue;}
-    if(c==="/balance"||c==="/report24"){const x=await getSummary(store);await send(id,`24H USDT ledger\nBought: ${x.bought_qty.toFixed(2)} USDT\nAvg buy: ${x.average_buy_bdt.toFixed(2)} BDT\nSold: ${x.sold_qty.toFixed(2)} USDT\nAvg sell: ${x.average_sell_bdt.toFixed(2)} BDT\nNet USDT: ${x.net_qty.toFixed(2)}\nGross BDT difference: ${x.gross_bdt.toFixed(2)}\nStorage: ${store.persistent?"persistent":"temporary"}`);continue;}
-    if(c==="/price"||c==="/spread"||c==="/p2p"){const s=sessions.get(String(id));if(s?.paused){await send(id,"Session is paused. Use /resume first.");continue;}const [buy,sell,fee="0"]=a;if(!(buy&&sell)){await send(id,"Usage: /p2p 126.80 127.70 0.0085");continue;}const feeRate=Number(fee)||(s?.data?.fees?.buy||0)+(s?.data?.fees?.sell||0);const z=calculateSignal({buyPrice:buy,sellPrice:sell,feeRate});await send(id,`CYCLE ANALYSIS\nBuy: ${z.buy_price_bdt.toFixed(2)}\nSell: ${z.sell_price_bdt.toFixed(2)}\nEffective buy: ${z.effective_buy_bdt.toFixed(4)}\nEffective sell: ${z.effective_sell_bdt.toFixed(4)}\nNet spread: ${z.spread_bdt.toFixed(4)} BDT/USDT\nNet margin: ${z.spread_pct.toFixed(3)}%\nSignal: ${z.signal}\nExecution: HUMAN CONFIRMATION REQUIRED`);continue;}
-    if(c==="/buy"||c==="/sell"){const [qty,price,...note]=a;const r=await recordTrade(store,{side:c==="/buy"?"BUY":"SELL",quantity:qty,price_bdt:price,note:note.join(" ")});await send(id,`Recorded ${r.side}: ${r.quantity} USDT @ ${r.price_bdt} BDT\nTotal: ${r.total_bdt.toFixed(2)} BDT`);continue;}
-    await send(id,"Unknown command. Use /help.");
-   }catch(e){await send(id,`Error: ${e.message}`);}
-  }
- }catch(e){console.error("Telegram polling error:",e.message);await new Promise(r=>setTimeout(r,5000));}}}
- loop();console.log("Telegram P2P control bot enabled");
+ const token=process.env.TELEGRAM_BOT_TOKEN;if(!token)return;let offset=0;const send=(id,text)=>api(token,"sendMessage",{chat_id:id,text});
+ (async()=>{while(true){try{for(const u of await api(token,"getUpdates",{offset,timeout:25,allowed_updates:["message"]})){offset=u.update_id+1;const m=u.message;if(!m?.chat?.id||!allowed(m.chat.id))continue;const id=m.chat.id,text=(m.text||"").trim(),[c,...a]=text.split(/\s+/);try{
+  if(m.photo){await send(id,"Screenshot received. Automatic OCR/ad extraction is not enabled yet. For now send /ads and enter the visible top ad prices.");continue;}
+  if(sessions.has(String(id))&&!text.startsWith("/")){await input(id,text,send);continue;}
+  if(c==="/starttrade"){sessions.set(String(id),{step:"capital",data:{}});await send(id,"P2P CYCLE SETUP\nCapital amount (BDT)?\nExamples: 50k = 50,000 | 1L = 100,000 | 1.25L = 125,000");continue;}
+  if(c==="/ads"){await send(id,"MANUAL AD ANALYSIS\nSend prices as:\n/p2p <best buy> <best sell>\nExample: /p2p 126.80 127.70\nYou can also upload a Binance P2P screenshot; automated extraction is the next module.");continue;}
+  if(c==="/buy"||c==="/sell"){if(a.length<2){await send(id,`Usage: ${c} <USDT amount> <price>\nExample: ${c} 393.70 127.00`);continue;}const q=amount(a[0]),p=amount(a[1]);const r=await recordTrade(store,{side:c==="/buy"?"BUY":"SELL",quantity:q,price_bdt:p,note:a.slice(2).join(" ")});await send(id,`RECORDED ${r.side}\n${r.quantity.toFixed(2)} USDT @ ${r.price_bdt.toFixed(2)} BDT\nTotal: ${r.total_bdt.toFixed(2)} BDT`);continue;}
+  if(c==="/p2p"||c==="/price"||c==="/spread"){if(a.length<2){await send(id,"Usage: /p2p 126.80 127.70");continue;}const buy=amount(a[0]),sell=amount(a[1]),s=sessions.get(String(id)),d=s?.data||{};const raw=(sell-buy)/buy,methodBuy=benefits(d.method,"BUY",d.merchantOptional),methodSell=benefits(d.method,"SELL",d.merchantOptional),fixed=d.method==="BankTransfer"&&d.bankType==="OtherBank"?10:0,alloc=Math.min(d.capital||d.bdt||0,d.bdt||d.capital||0),profit=alloc*(raw+methodBuy+methodSell)-fixed;await send(id,`P2P ANALYSIS\nBest buy: ${buy.toFixed(2)}\nBest sell: ${sell.toFixed(2)}\nRaw spread: ${(raw*100).toFixed(3)}%\nMethod benefit: +${((methodBuy+methodSell)*100).toFixed(2)}%\nFixed expense: -${fixed.toFixed(2)} BDT\nEstimated cycle profit: ${profit.toFixed(2)} BDT\nEstimated return: ${alloc?((profit/alloc)*100).toFixed(3):"0.000"}%\nSignal: ${profit>0?"POSITIVE — REVIEW":"NO TRADE"}\nExecution requires human confirmation.`);continue;}
+  if(c==="/balance"||c==="/report24"){const x=await getSummary(store);await send(id,`USDT LEDGER\nBought: ${x.bought_qty.toFixed(2)} @ ${x.average_buy_bdt.toFixed(2)}\nSold: ${x.sold_qty.toFixed(2)} @ ${x.average_sell_bdt.toFixed(2)}\nNet USDT: ${x.net_qty.toFixed(2)}\nGross cash difference: ${x.gross_bdt.toFixed(2)} BDT\nStorage: ${store.persistent?"persistent":"temporary"}`);continue;}
+  if(c==="/status"){const x=getStatus();await send(id,`P2connect: ${x.status}\nBinance configured: ${x.binanceConfigured?"yes":"no"}\nSession: ${sessions.has(String(id))?"active":"none"}`);continue;}
+  if(c==="/stoptrade"){sessions.delete(String(id));await send(id,"Cycle stopped. Ledger preserved.");continue;}
+  if(c==="/help"||c==="/start"){await send(id,"/starttrade /ads /p2p /buy /sell /balance /report24 /status /stoptrade");continue;}
+  await send(id,"Unknown command. Use /help.");
+ }catch(e){await send(id,`Error: ${e.message}`);}}}catch(e){console.error("Telegram:",e.message);await new Promise(r=>setTimeout(r,5000));}}})();
+ console.log("Telegram P2P bot enabled");
 }
-
-
-[executed on device: DESKTOP-9NBB4E3 (b3552ab2-7a45-4f09-83a8-bb7fd7363e4e)]
-
-[executed on device: DESKTOP-9NBB4E3 (b3552ab2-7a45-4f09-83a8-bb7fd7363e4e)]
