@@ -22,7 +22,7 @@ function cycleEstimate(d){
 }
 function cycleReady(d){
  const e=cycleEstimate(d);
- return `CYCLE READY\nSide: ${d.side}\nCapital available: ${d.capital.toFixed(2)} BDT\nCycle allocation: ${e.deployed.toFixed(2)} BDT\nTarget cycles: ${d.cycles}\nMethod: ${d.method}${d.bankType?` (${d.bankType})`:""}\nCurrent BDT: ${d.bdt.toFixed(2)}\nCurrent USDT: ${d.usdt.toFixed(2)}\n\n1% market target: ${e.target.toFixed(2)} BDT\nMethod profit: +${e.methodProfit.toFixed(2)} BDT\nMethod expense: -${e.fixed.toFixed(2)} BDT\nPredicted profit: ${e.predicted.toFixed(2)} BDT\n\nMARKET INPUT REQUIRED\nSend /ads then type the current top BUY/SELL ad prices, or send a Binance P2P screenshot for manual analysis.\n\nRecord a fill with:\n/${d.side.toLowerCase()} <USDT amount> <price>\nExample: /${d.side.toLowerCase()} 393.70 127.00`;}
+ return `CYCLE READY\nSide: ${d.side}\nCapital available: ${d.capital.toFixed(2)} BDT\nCycle allocation: ${e.deployed.toFixed(2)} BDT\nTarget cycles: ${d.cycles}\nMethod: ${d.method}${d.bankType?` (${d.bankType})`:""}\n1% market target: ${e.target.toFixed(2)} BDT\nMethod profit: +${e.methodProfit.toFixed(2)} BDT\nMethod expense: -${e.fixed.toFixed(2)} BDT\nPredicted profit: ${e.predicted.toFixed(2)} BDT\n\nMARKET INPUT REQUIRED\nSend /ads then type the current top BUY/SELL ad prices, or send a Binance P2P screenshot for manual analysis.\n\nRecord a fill with:\n/${d.side.toLowerCase()} <USDT amount> <price>\nExample: /${d.side.toLowerCase()} 393.70 127.00`;}
 async function input(id,text,send){
  const s=sessions.get(String(id)),d=s.data;
  if(s.step==="capital"){d.capital=amount(text);if(!(d.capital>0))throw Error("Use e.g. 50k, 1L, 1.25L or 125000.");s.step="cycles";return send(id,"Target cycles today?");}
