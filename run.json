@@ -1,0 +1,201 @@
+{
+  "run_name": "P2connect_P2P_Trading_Control_Rulebook",
+  "version": "1.0.0",
+  "purpose": "Reusable operating specification for a Telegram-controlled P2P USDT trading tracker, signal engine, fee-aware pricing calculator, cycle planner, and 24-hour transaction ledger.",
+  "operating_mode": {
+    "default": "analysis_and_tracking",
+    "trade_execution": "human_confirmation_required",
+    "target_profit_per_cycle": 0.01,
+    "maximum_target_profit_per_cycle": 0.05,
+    "profit_targets_are": "targets_not_guarantees",
+    "market_prediction": "estimate_only"
+  },
+  "session_start": {
+    "bot_must_ask": [
+      "capital_amount_bdt",
+      "target_cycles",
+      "payment_method",
+      "current_bdt_amount",
+      "current_usdt_amount"
+    ],
+    "payment_methods": [
+      "BankTransfer",
+      "BkashMerchant",
+      "BkashAgent",
+      "NagadAgent",
+      "BkashPersonal",
+      "NagadPersonal"
+    ],
+    "session_outputs": [
+      "starting_capital",
+      "starting_bdt",
+      "starting_usdt",
+      "target_cycles",
+      "selected_payment_method",
+      "target_daily_profit_bdt",
+      "target_daily_profit_percent",
+      "required_net_spread_by_cycle"
+    ]
+  },
+  "fee_rules": {
+    "currency": "BDT",
+    "BankTransfer_OtherBank": {"type": "fixed", "fee_bdt": 10, "applies_to": "transfer"},
+    "BankTransfer_SameBank": {"type": "fixed", "fee_bdt": 0, "applies_to": "transfer"},
+    "MFS_Agent_CashIn": {"type": "percentage", "rate": 0.004, "applies_to": "BUY_ONLY", "interpretation": "agent_profit_cost"},
+    "MFS_Agent_CashOut": {"type": "percentage", "rate": 0.004, "applies_to": "SELL_ONLY", "interpretation": "agent_profit_cost"},
+    "Bkash_Merchant_Payment_Receive": {"type": "percentage", "rate": 0.018, "applies_to": "SELL_RECEIPT", "interpretation": "merchant_receiving_cost"},
+    "Personal_MFS": {"type": "percentage", "rate": 0.007, "applies_to": "PERSONAL_MFS_FLOW", "interpretation": "personal_account_cost"},
+    "NPSB_From_MFS_Personal": {"type": "percentage", "rate": 0.0085, "applies_to": "TRANSFER", "interpretation": "NPSB_fee"},
+    "Merchant_CashOut": {"type": "percentage", "rate": 0.0135, "applies_to": "OPTIONAL_CASHOUT", "enabled_by_user": false},
+    "ATM_CashOut": {"type": "percentage", "rate": 0.014, "applies_to": "OPTIONAL_CASHOUT", "enabled_by_user": false}
+  },
+  "pricing_engine": {
+    "objective": "Calculate executable buy and sell prices after all selected payment-forwarding and recovery costs.",
+    "buy_price_rule": "The maximum executable BUY price is derived from available capital, selected payment method, required net spread, and all BUY-side costs.",
+    "sell_price_rule": "The minimum executable SELL price is derived from acquired USDT cost basis, selected recovery method, all SELL-side costs, and required net profit.",
+    "net_profit_formula": "net_profit = sell_proceeds - buy_cost - all_fixed_fees - all_percentage_fees - slippage - other_recorded_costs",
+    "net_margin_formula": "net_margin = net_profit / total_buy_cost",
+    "cycle_return_formula": "cycle_return = net_profit / cycle_capital",
+    "daily_estimate": "estimated_daily_profit = sum(estimated_cycle_profit for planned cycles)",
+    "fee_precedence": "Apply fixed fees and percentage fees to their defined transaction bases; never double-count a fee.",
+    "slippage": "Must be a configurable cost/allowance.",
+    "rounding": "Use actual exchange/order precision and round conservatively."
+  },
+  "market_analysis": {
+    "buy_ads": "Return top 5 eligible BUY advertisements in BDT/USDT.",
+    "sell_ads": "Return top 5 eligible SELL advertisements in BDT/USDT.",
+    "ranking_fields": [
+      "effective_price_after_fees",
+      "advertised_price",
+      "available_quantity",
+      "counterparty_limits",
+      "payment_method_match",
+      "completion_conditions",
+      "estimated_net_profit",
+      "estimated_net_margin",
+      "liquidity_score"
+    ],
+    "quick_analysis": [
+      "best_buy_price",
+      "best_sell_price",
+      "estimated_spread",
+      "estimated_net_profit",
+      "estimated_profit_percent",
+      "recommended_cycle_size_within_user_limits"
+    ],
+    "prediction_rule": "Use current observable market data and historical session data only; never present an estimate as a guaranteed outcome."
+  },
+  "cycle_tracking": {
+    "every_cycle_records": [
+      "cycle_id",
+      "timestamp_start",
+      "timestamp_end",
+      "payment_method",
+      "buy_order_id",
+      "sell_order_id",
+      "buy_quantity_usdt",
+      "buy_price_bdt",
+      "buy_total_bdt",
+      "buy_side_fees",
+      "sell_quantity_usdt",
+      "sell_price_bdt",
+      "sell_total_bdt",
+      "sell_side_fees",
+      "other_costs",
+      "net_profit_bdt",
+      "net_margin_percent",
+      "status",
+      "notes",
+      "evidence_reference"
+    ],
+    "statuses": [
+      "PLANNED",
+      "SIGNAL",
+      "BUY_PENDING",
+      "BUY_FILLED",
+      "SELL_PENDING",
+      "SELL_FILLED",
+      "RECONCILED",
+      "CANCELLED",
+      "DISPUTED"
+    ],
+    "reconciliation": "A cycle is not counted as completed profit until both sides and actual cash/USDT movements are reconciled."
+  },
+  "24_hour_reporting": {
+    "window": "rolling_24_hours",
+    "track": [
+      "cycles_completed",
+      "cycles_pending",
+      "total_usdt_bought",
+      "total_usdt_sold",
+      "average_buy_price",
+      "average_sell_price",
+      "gross_profit_bdt",
+      "fees_bdt",
+      "net_profit_bdt",
+      "net_return_percent",
+      "starting_bdt",
+      "ending_bdt",
+      "starting_usdt",
+      "ending_usdt",
+      "capital_utilization",
+      "largest_cycle",
+      "largest_loss",
+      "unreconciled_amount"
+    ],
+    "storage": {
+      "primary": "P2connect persistent database",
+      "archive": "Ace Care Google Drive, P2connect folder",
+      "recording": "incremental; preserve raw transaction records and periodic summaries"
+    }
+  },
+  "risk_controls": {
+    "required_before_signal": [
+      "payment_method_selected",
+      "sufficient_BDT_or_USDT",
+      "counterparty_limits_checked",
+      "all_known_fees_calculated",
+      "minimum_net_margin_threshold_checked"
+    ],
+    "recommended_defaults": {
+      "minimum_net_profit_bdt": 0,
+      "minimum_net_margin_percent": 1.0,
+      "maximum_single_cycle_capital_percent": 25,
+      "maximum_daily_loss_percent": 2,
+      "minimum_operating_buffer_percent": 10
+    },
+    "human_confirmation": "Required before any live trade execution.",
+    "kill_switch": "Bot must support a session stop/PAUSE command that prevents new signals from being acted upon while preserving existing records."
+  },
+  "telegram_interface": {
+    "session_start": "/starttrade",
+    "status": "/status",
+    "market": "/p2p",
+    "price_analysis": "/price",
+    "spread_analysis": "/spread",
+    "record_buy": "/buy",
+    "record_sell": "/sell",
+    "ledger": "/balance",
+    "daily_report": "/report24",
+    "pause": "/pause",
+    "resume": "/resume",
+    "cancel_session": "/stoptrade",
+    "help": "/help"
+  },
+  "data_integrity": {
+    "timestamps": "UTC in database; display Asia/Dhaka in Telegram.",
+    "money_precision": "Store sufficient decimal precision; display rounded values only.",
+    "audit_log": "Record configuration changes, fee changes, trade entries, corrections, and manual confirmations.",
+    "secret_handling": "Never store API secrets in run.json, GitHub, Telegram messages, logs, or reports."
+  },
+  "future_extensions": [
+    "Live Binance P2P advertisement ingestion",
+    "OCR of Telegram market screenshots",
+    "Automatic fee table versioning",
+    "Merchant/counterparty performance statistics",
+    "24-hour and 7-day profitability dashboards",
+    "Drive archival automation",
+    "PostgreSQL-backed ledger",
+    "Human-confirmed execution workflow"
+  ]
+}
