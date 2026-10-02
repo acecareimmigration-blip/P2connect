@@ -28,10 +28,40 @@ function allowed(id) {
 }
 
 function amount(value) {
-  const normalized = String(value).trim().toLowerCase().replace(/,/g, "");
+  const normalized = String(value).trim().toLowerCase().replace(/[৳,]/g, "");
   const match = normalized.match(/^([0-9]+(?:\.[0-9]+)?)\s*(k|l|lac|lakh)?$/);
   if (!match) return NaN;
   return Number(match[1]) * (match[2] === "k" ? 1000 : ["l", "lac", "lakh"].includes(match[2]) ? 100000 : 1);
+}
+
+function capitalAndRate(value) {
+  const normalized = String(value).trim().replace(/,/g, "");
+  const match = normalized.match(/^(.+?)\s*(?:@|\bat\b|\brate\b)\s*৳?\s*([0-9]+(?:\.[0-9]+)?)\s*$/i);
+  if (!match) return null;
+  const capital = amount(match[1].replace(/^capital\s+/i, "").trim());
+  const rate = Number(match[2]);
+  return capital > 0 && rate > 0 ? { capital, rate } : null;
+}
+
+function directTrade(command, args) {
+  const side = command === "/buy" ? "BUY" : "SELL";
+  const raw = args.join(" ").trim();
+  if (!raw) return null;
+
+  const bdt = raw.match(/^(.+?)\s*(?:@|\bat\b)\s*৳?\s*([0-9]+(?:\.[0-9]+)?)\s*$/i);
+  if (bdt) {
+    const capital = amount(bdt[1].trim());
+    const rate = Number(bdt[2]);
+    if (capital > 0 && rate > 0) return { side, quantity: capital / rate, rate, note: raw };
+  }
+
+  const usdt = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*(?:usdt)?\s*(?:@|\bat\b|\s)\s*৳?\s*([0-9]+(?:\.[0-9]+)?)\s*$/i);
+  if (usdt) {
+    const quantity = Number(usdt[1]);
+    const rate = Number(usdt[2]);
+    if (quantity > 0 && rate > 0) return { side, quantity, rate, note: raw };
+  }
+  return null;
 }
 
 function method(value) {
@@ -309,10 +339,14 @@ async function input(chatId, text, send, store) {
   const data = session.data;
 
   if (session.step === "capital") {
-    data.capital = amount(text);
-    if (!(data.capital > 0)) throw Error("Use 50k, 1L, 1.25L or a number.");
+    const combined = capitalAndRate(text);
+    data.capital = combined?.capital ?? amount(text);
+    if (!(data.capital > 0)) throw Error("Use 50k, 1L, 1.25L, 50000, or e.g. 50k at 126.50.");
+    if (combined) data.buyRate = combined.rate;
     session.step = "cycles";
-    return send(chatId, "Target cycles today?");
+    return send(chatId, combined
+      ? `Capital ৳${data.capital.toFixed(2)} and BUY rate ৳${data.buyRate.toFixed(2)} accepted. Estimated USDT: ${(data.capital / data.buyRate).toFixed(4)}\nTarget cycles today?`
+      : "Target cycles today?");
   }
 
   if (session.step === "cycles") {
@@ -539,14 +573,15 @@ export function startTelegramBot({ getStatus, store }) {
             }
 
             if (command === "/buy" || command === "/sell") {
-              if (args.length < 2) throw Error(`Usage: ${command} <USDT> <actual rate>`);
+              const parsed = directTrade(command, args);
+              if (!parsed) throw Error(`Usage: ${command} 50k at 126.50 OR ${command} 395.2569 USDT at 126.50`);
               const active = sessions.get(String(chatId));
               const record = await recordTrade(store, {
                 cycleId: active?.data?.cycleId || null,
-                side: command === "/buy" ? "BUY" : "SELL",
-                quantity: amount(args[0]),
-                price_bdt: Number(args[1]),
-                note: args.slice(2).join(" "),
+                side: parsed.side,
+                quantity: parsed.quantity,
+                price_bdt: parsed.rate,
+                note: parsed.note,
               });
               trackConfirmedTrade(active?.data?.cycleId || null, record.side, record.quantity);
               await send(chatId, `ACTUAL TRADE STORED\n${record.side}: ${record.quantity.toFixed(4)} USDT @ ${record.price_bdt.toFixed(2)}\nBDT value: ৳${record.total_bdt.toFixed(2)}`);
