@@ -563,6 +563,9 @@ export function startTelegramBot({ getStatus, store }) {
             }
 
             if (command === "/starttrade") {
+              // Always reset any stale conversational/pending state before a new cycle.
+              pendingFinancialByChat.delete(String(chatId));
+              correctionModeByChat.delete(String(chatId));
               sessions.set(String(chatId), {
                 step: "capital",
                 startedAt: new Date().toISOString(),
@@ -597,6 +600,9 @@ export function startTelegramBot({ getStatus, store }) {
             }
 
             if (command === "/stoptrade") {
+              // /stoptrade must work regardless of pending parser/correction state.
+              pendingFinancialByChat.delete(String(chatId));
+              correctionModeByChat.delete(String(chatId));
               const session = sessions.get(String(chatId));
               if (!session) {
                 await send(chatId, "No active cycle.");
