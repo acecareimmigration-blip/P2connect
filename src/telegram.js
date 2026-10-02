@@ -2,7 +2,7 @@ import { recordTrade, getSummary, recordCycle, nextCycleId } from "./ledger.js";
 import { buildPendingPreview, parseTradeMessage, parseTradeMessageFromAI } from "./tradeParser.js";
 
 const METHODS = ["BankTransfer", "BkashMerchant", "BkashAgent", "NagadAgent", "BkashPersonal", "NagadPersonal"];
-const SETTLEMENT = { Bank: 0, Bkash: 0.0185, Nagad: 0.015 };
+// Settlement is a routing label, not automatically a fee. Fees/benefits must be explicit.\nconst SETTLEMENT = { Bank: 0, Bkash: 0, Nagad: 0 };
 
 const sessions = new Map();
 const pinModes = new Set();
@@ -81,7 +81,7 @@ function method(value) {
 function benefit(paymentMethod, side, optional = false) {
   if (paymentMethod === "BankTransfer") return 0;
   if (paymentMethod === "BkashAgent" || paymentMethod === "NagadAgent") return 0.004;
-  if ((paymentMethod === "BkashPersonal" || paymentMethod === "NagadPersonal") && side === "SELL") return 0.007;
+  if (paymentMethod === "BkashPersonal" && side === "SELL") return 0.007;\n  if (paymentMethod === "NagadPersonal" && side === "SELL") return 0.015;
   if (paymentMethod === "BkashMerchant" && side === "SELL") return optional ? 0.018 : 0.004;
   return 0;
 }
@@ -104,7 +104,7 @@ function calc(data) {
 
 function ready(data) {
   const x = calc(data);
-  return `CYCLE READY\n\nCAPITAL: ৳${data.capital.toFixed(2)}\n\nBUY\n${data.buyMethod}${data.buyBankType ? ` (${data.buyBankType})` : ""} @ ${data.buyRate.toFixed(2)}\nUSDT acquired: ${x.usdt.toFixed(4)}\nMethod benefit: +৳${x.buyBenefit.toFixed(2)}\nFixed cost: -৳${x.buyFixed.toFixed(2)}\n\nSELL\n${data.sellMethod}${data.sellBankType ? ` (${data.sellBankType})` : ""} @ ${data.sellRate.toFixed(2)}\nGross proceeds: ৳${x.gross.toFixed(2)}\nMethod benefit: +৳${x.sellBenefit.toFixed(2)}\nFixed cost: -৳${x.sellFixed.toFixed(2)}\n\nSETTLEMENT: ${data.settlement}\nSettlement cost: -৳${x.settlementCost.toFixed(2)}\n\nPREDICTED NET PROFIT: ৳${x.net.toFixed(2)}\nPREDICTED RETURN: ${(x.margin * 100).toFixed(3)}%\n\nExecute manually, then record ACTUAL fills:\n/buy <USDT> <actual rate>\n/sell <USDT> <actual rate>\n\nFinish with /stoptrade`;
+  return `CYCLE READY\n\nCAPITAL: ৳${data.capital.toFixed(2)}\n\nBUY\n${data.buyMethod}${data.buyBankType ? ` (${data.buyBankType})` : ""} @ ${data.buyRate.toFixed(2)}\nUSDT acquired: ${x.usdt.toFixed(4)}\nMethod benefit: +৳${x.buyBenefit.toFixed(2)}\nFixed cost: -৳${x.buyFixed.toFixed(2)}\n\nSELL\n${data.sellMethod}${data.sellBankType ? ` (${data.sellBankType})` : ""} @ ${data.sellRate.toFixed(2)}\nGross proceeds: ৳${x.gross.toFixed(2)}\nMethod benefit: +৳${x.sellBenefit.toFixed(2)}\nFixed cost: -৳${x.sellFixed.toFixed(2)}\n\nSETTLEMENT: ${data.settlement}\nSettlement routing cost: -৳${x.settlementCost.toFixed(2)}\n\nPREDICTED NET PROFIT: ৳${x.net.toFixed(2)}\nPREDICTED RETURN: ${(x.margin * 100).toFixed(3)}%\n\nExecute manually, then record ACTUAL fills:\n/buy <USDT> <actual rate>\n/sell <USDT> <actual rate>\n\nFinish with /stoptrade`;
 }
 
 function trackConfirmedTrade(cycleId, side, quantity) {
