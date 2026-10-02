@@ -461,6 +461,29 @@ async function input(chatId, text, send, store) {
   return false;
 }
 
+async function chatWithAI(text, chatId, session, store) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  const model = process.env.OPENAI_MODEL;
+  if (!apiKey || !model) return "AI chat is not configured yet. Add OPENAI_API_KEY and OPENAI_MODEL in Render.";
+  const summary = await getSummary(store);
+  const context = `Active cycle: ${session?.data?.cycleId || "none"}. Ledger net USDT: ${summary.net_qty.toFixed(4)}. Never claim a trade was recorded unless the deterministic ledger confirms it.`;
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {"Content-Type":"application/json", Authorization:`Bearer ${apiKey}`},
+    body: JSON.stringify({
+      model,
+      instructions: "You are AceTradersCO, a concise P2P trading operations assistant. Speak naturally in English/Banglish when appropriate. Help with calculations, workflow and ledger questions. Never execute or record a financial transaction from chat; protected commands and explicit confirmation handle ledger writes. Do not invent balances, rates, fills or fees. " + context,
+      input: String(text),
+      max_output_tokens: 500
+    })
+  });
+  if (!response.ok) return `AI chat unavailable (HTTP ${response.status}). Commands still work.`;
+  const payload = await response.json();
+  if (payload.output_text) return payload.output_text;
+  for (const item of payload.output || []) for (const part of item.content || []) if (part.type === "output_text" && part.text) return part.text;
+  return "I could not generate a reply. Commands still work.";
+}
+
 export function startTelegramBot({ getStatus, store }) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) return;
