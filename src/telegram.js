@@ -1,4 +1,4 @@
-import { recordTrade, getSummary, recordCycle, nextCycleId } from "./ledger.js";
+import { recordTrade, getSummary, recordCycle, nextCycleId, saveChatMessage, getRecentChat, getActiveCycleSnapshot } from "./ledger.js";
 import { buildPendingPreview, parseTradeMessage, parseTradeMessageFromAI } from "./tradeParser.js";
 
 const METHODS = ["BankTransfer", "BkashMerchant", "BkashAgent", "NagadAgent", "BkashPersonal", "NagadPersonal"];
@@ -462,226 +462,31 @@ async function input(chatId, text, send, store) {
 }
 
 async function chatWithAI(text, chatId, session, store) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  const model = process.env.OPENAI_MODEL;
-  if (!apiKey || !model) return "AI chat is not configured yet. Add OPENAI_API_KEY and OPENAI_MODEL in Render.";
-  const summary = await getSummary(store);
-  const context = `Active cycle: ${session?.data?.cycleId || "none"}. Ledger net USDT: ${summary.net_qty.toFixed(4)}. Never claim a trade was recorded unless the deterministic ledger confirms it.`;
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {"Content-Type":"application/json", Authorization:`Bearer ${apiKey}`},
-    body: JSON.stringify({
-      model,
-      instructions: "You are AceTradersCO, a concise P2P trading operations assistant. Speak naturally in English/Banglish when appropriate. Help with calculations, workflow and ledger questions. Never execute or record a financial transaction from chat; protected commands and explicit confirmation handle ledger writes. Do not invent balances, rates, fills or fees. " + context,
-      input: String(text),
-      max_output_tokens: 500
-    })
-  });
-  if (!response.ok) return `AI chat unavailable (HTTP ${response.status}). Commands still work.`;
-  const payload = await response.json();
-  if (payload.output_text) return payload.output_text;
-  for (const item of payload.output || []) for (const part of item.content || []) if (part.type === "output_text" && part.text) return part.text;
-  return "I could not generate a reply. Commands still work.";
+  const apiKey=process.env.OPENAI_API_KEY, model=process.env.OPENAI_MODEL;
+  if(!apiKey||!model) return "AI chat is not configured yet. Add OPENAI_API_KEY and OPENAI_MODEL in Render.";
+  await saveChatMessage(store,chatId,"user",text);
+  const history=await getRecentChat(store,chatId,12);
+  const cycleId=session?.data?.cycleId||null;
+  const cycle=await getActiveCycleSnapshot(store,cycleId);
+  const summary=await getSummary(store);
+  const brain=[
+    "You are AceTradersCO, the professional P2P trading operations copilot.",
+    "Be concise, numerical and context-aware. English or Banglish is acceptable.",
+    "Ledger data is the source of truth. Never invent balances, rates, fills, fees or profit.",
+    "Never record, alter, confirm or imply execution of a trade through conversation.",
+    "Protected transaction workflow and explicit CONFIRM are required for ledger writes.",
+    "Distinguish realized cash flow, remaining inventory and estimated profit.",
+    "If data is insufficient, state exactly what is missing."
+  ].join(" ");
+  const state=JSON.stringify({active_cycle:cycle,portfolio:summary});
+  const messages=history.map(x=>({role:x.role,content:x.content}));
+  messages.push({role:"user",content:`CURRENT VERIFIED STATE: ${state}\nAnswer my latest request using this state.`});
+  const response=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${apiKey}`},body:JSON.stringify({model,instructions:brain,input:messages,max_output_tokens:600})});
+  if(!response.ok) return `AI chat unavailable (HTTP ${response.status}). Commands still work.`;
+  const payload=await response.json(); let reply=payload.output_text||"";
+  if(!reply) for(const item of payload.output||[]) for(const part of item.content||[]) if(part.type==="output_text"&&part.text) reply+=part.text;
+  reply=reply.trim()||"I could not generate a reply. Commands still work.";
+  await saveChatMessage(store,chatId,"assistant",reply);
+  return reply;
 }
 
-export function startTelegramBot({ getStatus, store }) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) return;
-
-  let offset = 0;
-  const send = (chatId, text, reply_markup) => api(token, "sendMessage", { chat_id: chatId, text, ...(reply_markup ? { reply_markup } : {}) });
-
-  (async () => {
-    while (true) {
-      try {
-        const updates = await api(token, "getUpdates", {
-          offset,
-          timeout: 25,
-          allowed_updates: ["message", "callback_query"],
-        });
-
-        for (const update of updates) {
-          offset = update.update_id + 1;
-          const message = update.message;
-          const callback = update.callback_query;
-
-          if (callback) {
-            const chatId = callback.message?.chat?.id;
-            if (chatId && allowed(chatId)) {
-              await api(token, "answerCallbackQuery", { callback_query_id: callback.id });
-              const action = callback.data;
-
-              if (await handleBrainCallback(chatId, action, send, store)) {
-                continue;
-              }
-
-              if (action === "starttrade") {
-                sessions.set(String(chatId), {
-                  step: "capital",
-                  startedAt: new Date().toISOString(),
-                  data: { cycleId: await nextCycleId(store) },
-                });
-                await send(chatId, "P2P CYCLE SETUP\nCapital amount?\nExamples: 50k = ৳50,000 | 1L = ৳100,000 | 1.25L = ৳125,000");
-              } else if (action === "continue") {
-                const session = sessions.get(String(chatId));
-                await send(chatId, session ? `ACTIVE CYCLE ${session.data.cycleId}\nCurrent step: ${session.step}\nReply with the requested value to continue.` : "No active cycle. Tap Start Trade to begin.");
-              } else if (action === "report") {
-                const summary = await getSummary(store);
-                await send(chatId, `TRANSACTION SUMMARY\nBought: ${summary.bought_qty.toFixed(4)} USDT @ ${summary.average_buy_bdt.toFixed(2)}\nSold: ${summary.sold_qty.toFixed(4)} USDT @ ${summary.average_sell_bdt.toFixed(2)}\nNet USDT: ${summary.net_qty.toFixed(4)}\nGross cash difference: ৳${summary.gross_bdt.toFixed(2)}`);
-              } else if (action === "help") {
-                await send(chatId, "/starttrade — new cycle\n/continue — continue active cycle\n/stoptrade — close cycle\n/report24 — summary\n/buy and /sell — record actual fills");
-              }
-            }
-            continue;
-          }
-
-          if (!message?.chat?.id || !allowed(message.chat.id)) continue;
-
-          const chatId = message.chat.id;
-          const text = (message.text || "").trim();
-          if (!text) continue;
-          const [command, ...args] = text.split(/\s+/);
-
-          try {
-            if (pinModes.has(String(chatId)) && !text.startsWith("/")) {
-              pinModes.delete(String(chatId));
-              const posted = await send(chatId, `PINNED INSTRUCTIONS\n\n${text}`);
-              try {
-                await api(token, "pinChatMessage", {
-                  chat_id: chatId,
-                  message_id: posted.message_id,
-                  disable_notification: true,
-                });
-              } catch {
-                await send(chatId, "Instruction saved, but I could not pin it. Make the bot an admin with permission to pin messages.");
-              }
-              continue;
-            }
-
-            if (sessions.has(String(chatId)) && !text.startsWith("/")) {
-              await input(chatId, text, send, store);
-              continue;
-            }
-
-            if (!text.startsWith("/") && (await parseAndMaybeMergePending(chatId, text, send, store))) {
-              continue;
-            }
-
-            if (command === "/pininstructions") {
-              pinModes.add(String(chatId));
-              await send(chatId, "Send the manual instructions now. I will post them and pin the message.\n\nRecommended: include BUY/SELL recording format, payment methods, fee rules, and the /starttrade → /stoptrade workflow.");
-              continue;
-            }
-
-            if (command === "/continue") {
-              const session = sessions.get(String(chatId));
-              await send(chatId, session ? `ACTIVE CYCLE ${session.data.cycleId}\nCurrent step: ${session.step}\nReply with the requested value to continue.` : "No active cycle. Use /starttrade.");
-              continue;
-            }
-
-            if (command === "/cycle") {
-              const session = sessions.get(String(chatId));
-              await send(chatId, session ? `ACTIVE CYCLE: ${session.data.cycleId}\nStep: ${session.step}` : "No active cycle.");
-              continue;
-            }
-
-            if (command === "/starttrade") {
-              // Always reset any stale conversational/pending state before a new cycle.
-              pendingFinancialByChat.delete(String(chatId));
-              correctionModeByChat.delete(String(chatId));
-              sessions.set(String(chatId), {
-                step: "capital",
-                startedAt: new Date().toISOString(),
-                data: { cycleId: await nextCycleId(store) },
-              });
-              await send(chatId, `P2P CYCLE SETUP\nCycle ID: ${sessions.get(String(chatId)).data.cycleId}\nCapital amount?\nExamples: 50k = ৳50,000 | 1L = ৳100,000 | 1.25L = ৳125,000`);
-              continue;
-            }
-
-            if (command === "/buy" || command === "/sell") {
-              const parsed = directTrade(command, args);
-              if (!parsed) throw Error(`Usage: ${command} 50k at 126.50 OR ${command} 395.2569 USDT at 126.50`);
-              const active = sessions.get(String(chatId));
-              const record = await recordTrade(store, {
-                cycleId: active?.data?.cycleId || null,
-                side: parsed.side,
-                quantity: parsed.quantity,
-                price_bdt: parsed.rate,
-                note: parsed.note,
-              });
-              trackConfirmedTrade(active?.data?.cycleId || null, record.side, record.quantity);
-              await send(chatId, `ACTUAL TRADE STORED\n${record.side}: ${record.quantity.toFixed(4)} USDT @ ${record.price_bdt.toFixed(2)}\nBDT value: ৳${record.total_bdt.toFixed(2)}`);
-              continue;
-            }
-
-            if (command === "/p2p") {
-              if (args.length < 2) throw Error("Usage: /p2p <buy> <sell>");
-              const buy = Number(args[0]);
-              const sell = Number(args[1]);
-              await send(chatId, `MARKET CHECK\nBUY: ${buy.toFixed(2)}\nSELL: ${sell.toFixed(2)}\nRaw spread: ${(((sell - buy) / buy) * 100).toFixed(3)}%`);
-              continue;
-            }
-
-            if (command === "/stoptrade") {
-              // /stoptrade must work regardless of pending parser/correction state.
-              pendingFinancialByChat.delete(String(chatId));
-              correctionModeByChat.delete(String(chatId));
-              const session = sessions.get(String(chatId));
-              if (!session) {
-                await send(chatId, "No active cycle.");
-                continue;
-              }
-              session.step = "close_bdt";
-              await send(chatId, "CYCLE CLOSING\nEnter CURRENT BDT amount after this cycle.");
-              continue;
-            }
-
-            if (command === "/report24" || command === "/balance") {
-              const summary = await getSummary(store);
-              await send(chatId, `TRANSACTION SUMMARY\nBought: ${summary.bought_qty.toFixed(4)} USDT @ ${summary.average_buy_bdt.toFixed(2)}\nSold: ${summary.sold_qty.toFixed(4)} USDT @ ${summary.average_sell_bdt.toFixed(2)}\nNet USDT: ${summary.net_qty.toFixed(4)}\nGross cash difference: ৳${summary.gross_bdt.toFixed(2)}\nStorage: ${store.persistent ? "PostgreSQL" : "temporary"}`);
-              continue;
-            }
-
-            if (command === "/status") {
-              const status = getStatus();
-              await send(chatId, `P2connect: ${status.status}\nBinance read-only: ${status.binanceConfigured ? "configured" : "not configured"}`);
-              continue;
-            }
-
-            if (command === "/help" || command === "/start") {
-              const posted = await send(chatId, "P2P TRADE CONTROL\n\nUse the buttons below to start/continue a cycle or view the ledger.\n\nManual instructions: /pininstructions", {
-                inline_keyboard: [
-                  [
-                    { text: "▶ Start Trade", callback_data: "starttrade" },
-                    { text: "↪ Continue", callback_data: "continue" },
-                  ],
-                  [
-                    { text: "📊 Report", callback_data: "report" },
-                    { text: "❓ Help", callback_data: "help" },
-                  ],
-                ],
-              });
-              try {
-                await api(token, "pinChatMessage", {
-                  chat_id: chatId,
-                  message_id: posted.message_id,
-                  disable_notification: true,
-                });
-              } catch {
-                // ignore pin failure
-              }
-              continue;
-            }
-
-            await send(chatId, "Unknown command. Use /help.");
-          } catch (error) {
-            await send(chatId, `Error: ${error.message}`);
-          }
-        }
-      } catch (error) {
-        console.error("Telegram:", error.message);
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-      }
-    }
-  })();
-}
