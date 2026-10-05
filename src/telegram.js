@@ -1,3 +1,4 @@
+import { getSpotBalances } from "./binance.js";
 import { recordTrade, getSummary, recordCycle, nextCycleId, saveChatMessage, getRecentChat, getActiveCycleSnapshot } from "./ledger.js";
 import { buildPendingPreview, parseTradeMessage, parseTradeMessageFromAI } from "./tradeParser.js";
 
