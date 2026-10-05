@@ -7,6 +7,8 @@ export async function initLedger(){
  await pool.query(`ALTER TABLE p2p_trades ADD COLUMN IF NOT EXISTS cycle_id TEXT`);
  await pool.query(`CREATE TABLE IF NOT EXISTS p2p_cycles(id BIGSERIAL PRIMARY KEY,cycle_id TEXT NOT NULL UNIQUE,started_at TIMESTAMPTZ NOT NULL,ended_at TIMESTAMPTZ,side TEXT NOT NULL,payment_method TEXT NOT NULL,bank_type TEXT,capital_bdt NUMERIC NOT NULL,start_bdt NUMERIC,start_usdt NUMERIC,end_bdt NUMERIC,end_usdt NUMERIC,expected_profit_bdt NUMERIC,actual_profit_bdt NUMERIC,status TEXT NOT NULL,notes TEXT)`);
  await pool.query(`CREATE TABLE IF NOT EXISTS p2p_sequence(name TEXT PRIMARY KEY,value BIGINT NOT NULL)`);
+ await pool.query(`CREATE TABLE IF NOT EXISTS p2p_chat_memory(id BIGSERIAL PRIMARY KEY,chat_id TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('user','assistant')),content TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+ await pool.query(`CREATE INDEX IF NOT EXISTS p2p_chat_memory_chat_time_idx ON p2p_chat_memory(chat_id,created_at DESC)`);
  await pool.query(`INSERT INTO p2p_sequence(name,value) VALUES('cycle',0) ON CONFLICT(name) DO NOTHING`);
  return {persistent:true,pool};
 }
@@ -36,4 +38,25 @@ export async function recordCycle(store,cycle){
  if(!store.persistent)return {...cycle,persisted:false};
  const r=await store.pool.query(`INSERT INTO p2p_cycles(cycle_id,started_at,ended_at,side,payment_method,bank_type,capital_bdt,start_bdt,start_usdt,end_bdt,end_usdt,expected_profit_bdt,actual_profit_bdt,status,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,[cycle.cycleId,cycle.startedAt,cycle.endedAt||null,cycle.side,cycle.paymentMethod,cycle.bankType||null,cycle.capitalBdt,cycle.startBdt??null,cycle.startUsdt??null,cycle.endBdt??null,cycle.endUsdt??null,cycle.expectedProfitBdt??null,cycle.actualProfitBdt??null,cycle.status,cycle.notes||null]);
  return {...cycle,dbId:r.rows[0].id,persisted:true};
+}
+export async function saveChatMessage(store,chatId,role,content){
+ if(!store.persistent)return;
+ const text=String(content||"").trim(); if(!text)return;
+ await store.pool.query("INSERT INTO p2p_chat_memory(chat_id,role,content) VALUES($1,$2,$3)",[String(chatId),role,text.slice(0,4000)]);
+}
+export async function getRecentChat(store,chatId,limit=12){
+ if(!store.persistent)return [];
+ const n=Math.max(1,Math.min(Number(limit)||12,30));
+ const r=await store.pool.query("SELECT role,content,created_at FROM p2p_chat_memory WHERE chat_id=$1 ORDER BY created_at DESC LIMIT $2",[String(chatId),n]);
+ return r.rows.reverse();
+}
+export async function getActiveCycleSnapshot(store,cycleId){
+ if(!cycleId)return null;
+ let trades=[];
+ if(store.persistent) trades=(await store.pool.query("SELECT side,quantity,price_bdt,total_bdt,created_at FROM p2p_trades WHERE cycle_id=$1 ORDER BY created_at",[cycleId])).rows;
+ else trades=memory.filter(x=>x.cycleId===cycleId);
+ const buys=trades.filter(x=>x.side==="BUY"), sells=trades.filter(x=>x.side==="SELL");
+ const bq=buys.reduce((s,x)=>s+Number(x.quantity),0), sq=sells.reduce((s,x)=>s+Number(x.quantity),0);
+ const bb=buys.reduce((s,x)=>s+Number(x.total_bdt),0), sb=sells.reduce((s,x)=>s+Number(x.total_bdt),0);
+ return {cycleId,bought_usdt:bq,sold_usdt:sq,remaining_usdt:bq-sq,buy_bdt:bb,sell_bdt:sb,avg_buy:bq?bb/bq:0,avg_sell:sq?sb/sq:0,realized_cashflow_bdt:sb-bb,trades};
 }
